@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write  # for PyPI trusted publishing
+
+jobs:
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest    # Apple Silicon
+            target: aarch64-apple-darwin
+            artifact: ipb-macos-arm64
+
+          - runner: macos-13        # Intel
+            target: x86_64-apple-darwin
+            artifact: ipb-macos-x86_64
+
+          - runner: ubuntu-latest   # Linux x86_64 (static musl)
+            target: x86_64-unknown-linux-musl
+            artifact: ipb-linux-x86_64
+            apt: musl-tools
+
+          - runner: ubuntu-24.04-arm  # Linux arm64 (static musl)
+            target: aarch64-unknown-linux-musl
+            artifact: ipb-linux-arm64
+            apt: musl-tools
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        if: matrix.apt
+        run: sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          BIN=target/${{ matrix.target }}/release/ipb
+          mkdir -p dist
+          cp "$BIN" dist/ipb
+          tar -czf dist/${{ matrix.artifact }}.tar.gz -C dist ipb
+          rm dist/ipb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ipbeeldbuis
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        run: |
+          pip install hatchling build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
