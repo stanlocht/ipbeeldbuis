@@ -423,19 +423,17 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
             let bg = if is_sel { HIGHLIGHT_BG } else { BG };
             let prefix = if is_sel { "▶ " } else { "  " };
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {prefix}{}", entry.name),
-                    if is_sel {
-                        Style::default()
-                            .fg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                            .bg(bg)
-                    } else {
-                        Style::default().fg(Color::White).bg(bg)
-                    },
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {prefix}{}", entry.name),
+                if is_sel {
+                    Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(bg)
+                } else {
+                    Style::default().fg(Color::White).bg(bg)
+                },
+            )]));
             lines.push(Line::from(vec![
                 Span::styled("    URL  ", Style::default().fg(DIM).bg(bg)),
                 Span::styled(
@@ -494,11 +492,9 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
         );
     } else {
         f.render_widget(
-            Paragraph::new(
-                " ↑↓/jk navigate   e/Enter edit EPG   d delete   Esc/q back",
-            )
-            .style(Style::default().fg(DIM).bg(BG))
-            .alignment(Alignment::Center),
+            Paragraph::new(" ↑↓/jk navigate   e/Enter edit EPG   d delete   Esc/q back")
+                .style(Style::default().fg(DIM).bg(BG))
+                .alignment(Alignment::Center),
             layout[2],
         );
     }
@@ -598,10 +594,7 @@ fn draw_epg_panel(f: &mut Frame, area: ratatui::layout::Rect, app: &AppState) {
                     )));
                     if let Some(desc) = &prog.desc {
                         for line in wrap_text(desc, inner_width).into_iter().take(4) {
-                            lines.push(Line::from(Span::styled(
-                                line,
-                                Style::default().fg(DIM),
-                            )));
+                            lines.push(Line::from(Span::styled(line, Style::default().fg(DIM))));
                         }
                     }
                     lines.push(Line::raw(""));
@@ -801,9 +794,7 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(
-                    Style::default().fg(if app.search_mode { ACCENT } else { DIM }),
-                )
+                .border_style(Style::default().fg(if app.search_mode { ACCENT } else { DIM }))
                 .style(Style::default().bg(BG)),
         ),
         layout[2],

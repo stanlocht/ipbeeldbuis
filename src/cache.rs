@@ -88,7 +88,7 @@ pub fn prompt_add_playlist() -> Result<PlaylistEntry> {
     }
     let name = url
         .split('/')
-        .last()
+        .next_back()
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_string();
@@ -99,7 +99,12 @@ pub fn prompt_add_playlist() -> Result<PlaylistEntry> {
         let s = epg.trim().to_string();
         if s.is_empty() { None } else { Some(s) }
     };
-    Ok(PlaylistEntry { name, url, last_fetched: 0, epg_url })
+    Ok(PlaylistEntry {
+        name,
+        url,
+        last_fetched: 0,
+        epg_url,
+    })
 }
 
 pub fn pick_playlist(playlists: &[PlaylistEntry]) -> Result<usize> {

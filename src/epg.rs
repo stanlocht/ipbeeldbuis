@@ -93,8 +93,8 @@ pub(crate) fn format_time(ts: u64) -> String {
 }
 
 pub fn parse_xmltv(xml: &str) -> Result<EpgData> {
-    use quick_xml::events::Event;
     use quick_xml::Reader;
+    use quick_xml::events::Event;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

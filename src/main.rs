@@ -4,7 +4,7 @@ mod m3u;
 mod player;
 mod ui;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -120,10 +120,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_playlist_content(
-    playlists: &mut Vec<cache::PlaylistEntry>,
-    idx: usize,
-) -> Result<String> {
+fn load_playlist_content(playlists: &mut [cache::PlaylistEntry], idx: usize) -> Result<String> {
     let url = playlists[idx].url.clone();
 
     if !cache::needs_refresh(&playlists[idx]) {
