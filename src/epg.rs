@@ -153,14 +153,15 @@ pub fn parse_xmltv(xml: &str) -> Result<EpgData> {
                 b"desc" if in_programme => in_desc = true,
                 _ => {}
             },
-            Ok(Event::Text(ref e)) => {
-                if in_title && current_title.is_none() {
-                    if let Ok(text) = e.unescape() {
-                        current_title = Some(text.into_owned());
-                    }
-                } else if in_desc && current_desc.is_none() {
-                    if let Ok(text) = e.unescape() {
-                        current_desc = Some(text.into_owned());
+            Ok(Event::Text(e)) => {
+                if let Ok(raw) = std::str::from_utf8(&e) {
+                    let text = quick_xml::escape::unescape(raw)
+                        .unwrap_or(std::borrow::Cow::Borrowed(raw))
+                        .into_owned();
+                    if in_title && current_title.is_none() {
+                        current_title = Some(text);
+                    } else if in_desc && current_desc.is_none() {
+                        current_desc = Some(text);
                     }
                 }
             }

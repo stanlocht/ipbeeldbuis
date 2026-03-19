@@ -215,7 +215,10 @@ pub fn run(channels: &[Channel], epg: Option<&EpgData>) -> Result<Action> {
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut AppState,
-) -> Result<Action> {
+) -> Result<Action>
+where
+    B::Error: Send + Sync + 'static,
+{
     loop {
         terminal.draw(|f| draw(f, app))?;
 
@@ -305,7 +308,10 @@ pub fn run_settings(playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
 fn settings_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     playlists: &mut Vec<PlaylistEntry>,
-) -> Result<()> {
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut state = SettingsState {
         selected: 0,
         editing_epg: false,
