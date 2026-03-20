@@ -175,10 +175,10 @@ fn main() -> Result<()> {
 fn load_playlist_content(playlists: &mut [cache::PlaylistEntry], idx: usize) -> Result<String> {
     let url = playlists[idx].url.clone();
 
-    if !cache::needs_refresh(&playlists[idx]) {
-        if let Some(cached) = cache::load_cached_m3u(&url) {
-            return Ok(cached);
-        }
+    if !cache::needs_refresh(&playlists[idx])
+        && let Some(cached) = cache::load_cached_m3u(&url)
+    {
+        return Ok(cached);
     }
 
     eprint!("Fetching playlist...");

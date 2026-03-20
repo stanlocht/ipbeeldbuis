@@ -175,15 +175,15 @@ pub fn parse_xmltv(xml: &str) -> Result<EpgData> {
                     if in_programme {
                         if let (Some(ch), Some(title)) =
                             (current_channel.take(), current_title.take())
+                            && current_start >= window_start
+                            && current_start <= window_end
                         {
-                            if current_start >= window_start && current_start <= window_end {
-                                data.entry(ch).or_default().push(Programme {
-                                    title,
-                                    desc: current_desc.take(),
-                                    start: current_start,
-                                    stop: current_stop,
-                                });
-                            }
+                            data.entry(ch).or_default().push(Programme {
+                                title,
+                                desc: current_desc.take(),
+                                start: current_start,
+                                stop: current_stop,
+                            });
                         }
                         in_programme = false;
                     }
