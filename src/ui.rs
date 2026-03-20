@@ -15,7 +15,21 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io;
+use std::io::{self, Stdout};
+
+pub type Term = Terminal<CrosstermBackend<Stdout>>;
+
+pub fn setup_terminal() -> Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+}
+
+pub fn restore_terminal(terminal: &mut Term) {
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+}
 
 const ACCENT: Color = Color::Rgb(120, 200, 255);
 const DIM: Color = Color::Rgb(100, 100, 120);
@@ -23,6 +37,11 @@ const GROUP_COLOR: Color = Color::Rgb(180, 140, 255);
 const BG: Color = Color::Rgb(10, 10, 18);
 const HIGHLIGHT_BG: Color = Color::Rgb(25, 40, 65);
 const PURPLE: Color = Color::Rgb(180, 100, 255);
+
+fn normalise_tvg_id(s: &str) -> String {
+    let stripped = s.rfind('@').map_or(s, |i| &s[..i]);
+    stripped.to_lowercase()
+}
 
 pub enum Action {
     Play(Channel),
@@ -76,6 +95,9 @@ struct AppState<'a> {
     all_channels: &'a [Channel],
     epg: Option<&'a EpgData>,
     epg_visible: bool,
+    epg_only: bool,
+    show_epg_info: bool,
+    epg_info_scroll: usize,
     groups: Vec<String>,
     group_idx: usize,
     tab_offset: usize,
@@ -93,6 +115,9 @@ impl<'a> AppState<'a> {
             all_channels: channels,
             epg,
             epg_visible,
+            epg_only: false,
+            show_epg_info: false,
+            epg_info_scroll: 0,
             groups: Vec::new(),
             group_idx: 0,
             tab_offset: 0,
@@ -137,7 +162,19 @@ impl<'a> AppState<'a> {
                 let search_ok = query.is_empty()
                     || ch.name.to_lowercase().contains(&query)
                     || ch.display_group().to_lowercase().contains(&query);
-                content_ok && group_ok && search_ok
+                let epg_ok = !self.epg_only
+                    || match (self.epg, &ch.tvg_id) {
+                        (Some(epg_data), Some(tvg_id)) => {
+                            let id_lower = tvg_id.to_lowercase();
+                            let id_norm = normalise_tvg_id(tvg_id);
+                            epg_data.contains_key(tvg_id.as_str())
+                                || epg_data.keys().any(|k| {
+                                    k.to_lowercase() == id_lower || normalise_tvg_id(k) == id_norm
+                                })
+                        }
+                        _ => false,
+                    };
+                content_ok && group_ok && search_ok && epg_ok
             })
             .map(|(i, _)| i)
             .collect();
@@ -192,37 +229,45 @@ impl<'a> AppState<'a> {
         self.search_mode = false;
         self.rebuild_groups();
     }
+
+    fn toggle_epg_filter(&mut self) {
+        if self.epg.is_some() {
+            self.epg_only = !self.epg_only;
+            self.refresh_filter();
+        }
+    }
 }
 
 // ─── Main TUI entry point ─────────────────────────────────────────────────────
 
-pub fn run(channels: &[Channel], epg: Option<&EpgData>) -> Result<Action> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
+pub fn run(terminal: &mut Term, channels: &[Channel], epg: Option<&EpgData>) -> Result<Action> {
     let mut app = AppState::new(channels, epg);
-    let result = event_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    result
+    event_loop(terminal, &mut app)
 }
 
-fn event_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut AppState,
-) -> Result<Action>
-where
-    B::Error: Send + Sync + 'static,
-{
+fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
     loop {
         terminal.draw(|f| draw(f, app))?;
 
         if let Event::Key(key) = event::read()? {
+            // EPG info overlay intercepts all keys
+            if app.show_epg_info {
+                match key.code {
+                    KeyCode::Char('i') | KeyCode::Esc | KeyCode::Char('q') => {
+                        app.show_epg_info = false;
+                        app.epg_info_scroll = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.epg_info_scroll = app.epg_info_scroll.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.epg_info_scroll = app.epg_info_scroll.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             if app.search_mode {
                 match key.code {
                     KeyCode::Esc => {
@@ -268,6 +313,15 @@ where
                             app.epg_visible = !app.epg_visible;
                         }
                     }
+                    (_, KeyCode::Char('f')) => {
+                        app.toggle_epg_filter();
+                    }
+                    (_, KeyCode::Char('i')) => {
+                        if app.epg.is_some() {
+                            app.show_epg_info = true;
+                            app.epg_info_scroll = 0;
+                        }
+                    }
                     (_, KeyCode::Char('s')) => return Ok(Action::OpenSettings),
                     (_, KeyCode::Char('a')) => return Ok(Action::AddPlaylist),
                     (_, KeyCode::Enter) => {
@@ -290,28 +344,11 @@ struct SettingsState {
     edit_buf: String,
 }
 
-pub fn run_settings(playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let result = settings_loop(&mut terminal, playlists);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    result
+pub fn run_settings(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
+    settings_loop(terminal, playlists)
 }
 
-fn settings_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    playlists: &mut Vec<PlaylistEntry>,
-) -> Result<()>
-where
-    B::Error: Send + Sync + 'static,
-{
+fn settings_loop(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
     let mut state = SettingsState {
         selected: 0,
         editing_epg: false,
@@ -544,6 +581,156 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
+fn draw_epg_info_overlay(f: &mut Frame, app: &AppState) {
+    use ratatui::layout::Rect;
+
+    let area = f.area();
+    // Centered box: 80% width, 80% height
+    let w = (area.width * 4 / 5).max(40);
+    let h = (area.height * 4 / 5).max(10);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    let inner_w = popup.width.saturating_sub(4) as usize;
+    let inner_h = popup.height.saturating_sub(2) as usize; // rows available for content
+
+    // Build content lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // EPG side
+    let epg_ids: Vec<String> = if let Some(epg) = app.epg {
+        let mut ids: Vec<String> = epg.keys().cloned().collect();
+        ids.sort();
+        ids
+    } else {
+        vec![]
+    };
+
+    // M3U tvg-id side
+    let mut m3u_ids: Vec<&str> = app
+        .all_channels
+        .iter()
+        .filter_map(|ch| ch.tvg_id.as_deref())
+        .collect();
+    m3u_ids.sort();
+    m3u_ids.dedup();
+
+    let epg_count = epg_ids.len();
+    let m3u_count = m3u_ids.len();
+
+    // Count matches
+    let match_count = m3u_ids
+        .iter()
+        .filter(|&&id| {
+            let id_lower = id.to_lowercase();
+            let id_norm = normalise_tvg_id(id);
+            epg_ids
+                .iter()
+                .any(|k| k == id || k.to_lowercase() == id_lower || normalise_tvg_id(k) == id_norm)
+        })
+        .count();
+
+    lines.push(Line::from(vec![
+        Span::styled("EPG channels: ", Style::default().fg(DIM)),
+        Span::styled(
+            epg_count.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   M3U tvg-ids: ", Style::default().fg(DIM)),
+        Span::styled(
+            m3u_count.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   Matched: ", Style::default().fg(DIM)),
+        Span::styled(
+            match_count.to_string(),
+            Style::default()
+                .fg(if match_count > 0 {
+                    Color::Green
+                } else {
+                    Color::Red
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+
+    let col_w = inner_w / 2;
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<col_w$}", "EPG IDs"),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "M3U tvg-ids",
+            Style::default()
+                .fg(GROUP_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner_w),
+        Style::default().fg(DIM),
+    )));
+
+    let max_rows = epg_count.max(m3u_count);
+    for i in 0..max_rows {
+        let epg_cell = epg_ids.get(i).map(String::as_str).unwrap_or("");
+        let m3u_cell = m3u_ids.get(i).copied().unwrap_or("");
+        let epg_lower = epg_cell.to_lowercase();
+        let m3u_lower = m3u_cell.to_lowercase();
+        let matched = !epg_cell.is_empty() && !m3u_cell.is_empty() && epg_lower == m3u_lower;
+        let epg_style = if matched {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let m3u_style = if matched {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<col_w$}", truncate(epg_cell, col_w.saturating_sub(1))),
+                epg_style,
+            ),
+            Span::styled(truncate(m3u_cell, col_w), m3u_style),
+        ]));
+    }
+
+    // Clamp scroll
+    let max_scroll = lines.len().saturating_sub(inner_h);
+    let scroll = app.epg_info_scroll.min(max_scroll);
+
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(inner_h).collect();
+
+    // Clear background
+    f.render_widget(Block::default().style(Style::default().bg(BG)), popup);
+    f.render_widget(
+        Paragraph::new(visible).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT))
+                .style(Style::default().bg(BG))
+                .title(Span::styled(
+                    " EPG Info — ↑↓ scroll   i/Esc close ",
+                    Style::default().fg(ACCENT),
+                )),
+        ),
+        popup,
+    );
+}
+
 fn draw_epg_panel(f: &mut Frame, area: ratatui::layout::Rect, app: &AppState) {
     let epg_data = match app.epg {
         Some(e) => e,
@@ -704,22 +891,28 @@ fn draw(f: &mut Frame, app: &mut AppState) {
     // Title bar
     let count = app.filtered.len();
     let total = app.all_channels.len();
+    let mut title_spans = vec![
+        Span::styled(
+            " ipbeeldbuis",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  [{}]", app.content_filter.label()),
+            Style::default().fg(GROUP_COLOR),
+        ),
+        Span::styled(
+            format!("  {count}/{total} channels"),
+            Style::default().fg(DIM),
+        ),
+    ];
+    if app.epg_only {
+        title_spans.push(Span::styled(
+            "  [EPG only]",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ipbeeldbuis",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  [{}]", app.content_filter.label()),
-                Style::default().fg(GROUP_COLOR),
-            ),
-            Span::styled(
-                format!("  {count}/{total} channels"),
-                Style::default().fg(DIM),
-            ),
-        ]))
-        .style(Style::default().bg(BG)),
+        Paragraph::new(Line::from(title_spans)).style(Style::default().bg(BG)),
         layout[0],
     );
 
@@ -854,11 +1047,16 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         &mut app.list_state,
     );
 
+    // EPG info overlay (drawn on top of everything)
+    if app.show_epg_info {
+        draw_epg_info_overlay(f, app);
+    }
+
     // Keybinding hints
     let hints = if app.search_mode {
         " ↑↓ navigate   Esc clear   Enter confirm"
     } else if app.epg.is_some() {
-        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   e epg   s settings   Enter play   q quit"
+        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   f epg filter   e epg   i epg info   s settings   Enter play   q quit"
     } else {
         " ↑↓/jk navigate   ←→/hl tabs   / search   t content   s settings   a add   Enter play   q quit"
     };

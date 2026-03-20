@@ -31,6 +31,9 @@ fn fetch_epg(url: &str) -> Result<String> {
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
     let resp = client.get(url).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("EPG fetch returned HTTP {}", resp.status());
+    }
     let bytes = resp.bytes()?;
 
     // Detect gzip by magic bytes
@@ -100,8 +103,8 @@ pub fn parse_xmltv(xml: &str) -> Result<EpgData> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let window_start = now.saturating_sub(86400);
-    let window_end = now + 86400;
+    let window_start = now.saturating_sub(7 * 86400);
+    let window_end = now + 7 * 86400;
 
     let mut data: EpgData = HashMap::new();
     let mut reader = Reader::from_str(xml);
@@ -205,13 +208,29 @@ pub fn now_and_next<'a>(
     data: &'a EpgData,
     tvg_id: &str,
 ) -> (Option<&'a Programme>, Option<&'a Programme>) {
-    // Exact match first, then case-insensitive fallback (M3U and EPG sources
-    // often differ in capitalisation, e.g. "BBC1" vs "bbc1").
+    // Normalise a tvg-id for loose matching: lowercase and strip trailing
+    // quality suffix like "@SD", "@HD", "@FHD" (iptv-org M3U convention).
+    fn normalise(s: &str) -> String {
+        let stripped = if let Some(at) = s.rfind('@') {
+            &s[..at]
+        } else {
+            s
+        };
+        stripped.to_lowercase()
+    }
+
+    // 1. Exact match
+    // 2. Case-insensitive match
+    // 3. Match after stripping @suffix from both sides
     let progs = if let Some(p) = data.get(tvg_id) {
         p
     } else {
         let id_lower = tvg_id.to_lowercase();
-        match data.iter().find(|(k, _)| k.to_lowercase() == id_lower) {
+        let id_norm = normalise(tvg_id);
+        match data
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == id_lower || normalise(k) == id_norm)
+        {
             Some((_, p)) => p,
             None => return (None, None),
         }

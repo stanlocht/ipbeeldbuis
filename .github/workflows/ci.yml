@@ -15,14 +15,6 @@ jobs:
       - run: cargo build
       - run: cargo test
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-
   prek:
     name: Prek checks
     runs-on: ubuntu-latest

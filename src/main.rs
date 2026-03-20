@@ -20,7 +20,14 @@ fn load_epg(url: Option<&str>) -> Option<epg::EpgData> {
     eprint!("Loading EPG...");
     match epg::load(url) {
         Some(data) => {
-            eprintln!(" done.");
+            let n = data.len();
+            eprintln!(" done ({n} channels in EPG).");
+            if n > 0 {
+                let mut sample: Vec<&str> = data.keys().map(String::as_str).collect();
+                sample.sort();
+                let show = sample.len().min(8);
+                eprintln!("  EPG IDs (sample): {:?}", &sample[..show]);
+            }
             Some(data)
         }
         None => {
@@ -42,6 +49,18 @@ fn main() -> Result<()> {
         let content = m3u::fetch_or_read_raw(&source)?;
         let channels = m3u::parse(&content);
         eprintln!(" {} channels found.", channels.len());
+        {
+            let mut ids: Vec<&str> = channels
+                .iter()
+                .filter_map(|ch| ch.tvg_id.as_deref())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            let show = ids.len().min(8);
+            if show > 0 {
+                eprintln!("  M3U tvg-ids (sample): {:?}", &ids[..show]);
+            }
+        }
         if channels.is_empty() {
             eprintln!("Response body: {} bytes", content.len());
             match content.lines().next() {
@@ -52,14 +71,23 @@ fn main() -> Result<()> {
         }
         let epg_url = m3u::parse_epg_url(&content);
         let epg_data = load_epg(epg_url.as_deref());
-        loop {
-            match ui::run(&channels, epg_data.as_ref())? {
-                ui::Action::Play(ch) => player::play(&ch.url, &ch.name)?,
-                ui::Action::Quit => break,
-                ui::Action::AddPlaylist | ui::Action::OpenSettings => {} // no-op in one-shot mode
+        let mut terminal = ui::setup_terminal()?;
+        let result = (|| -> Result<()> {
+            loop {
+                match ui::run(&mut terminal, &channels, epg_data.as_ref())? {
+                    ui::Action::Play(ch) => {
+                        ui::restore_terminal(&mut terminal);
+                        player::play(&ch.url, &ch.name)?;
+                        terminal = ui::setup_terminal()?;
+                    }
+                    ui::Action::Quit => break,
+                    ui::Action::AddPlaylist | ui::Action::OpenSettings => {}
+                }
             }
-        }
-        return Ok(());
+            Ok(())
+        })();
+        ui::restore_terminal(&mut terminal);
+        return result;
     }
 
     // 3. Persistence flow
@@ -76,48 +104,72 @@ fn main() -> Result<()> {
         cache::pick_playlist(&playlists)?
     };
 
-    'main: loop {
-        let content = load_playlist_content(&mut playlists, active_idx)?;
-        cache::save_playlists(&playlists);
+    let mut terminal = ui::setup_terminal()?;
+    let result = (|| -> Result<()> {
+        'main: loop {
+            let content = load_playlist_content(&mut playlists, active_idx)?;
+            cache::save_playlists(&playlists);
 
-        let channels = m3u::parse(&content);
-        if channels.is_empty() {
-            bail!("No channels found in playlist.");
-        }
-
-        // EPG: prefer manually set URL, fall back to M3U header
-        let header_epg = m3u::parse_epg_url(&content);
-        let epg_url = playlists[active_idx]
-            .epg_url
-            .as_deref()
-            .or(header_epg.as_deref());
-        let epg_data = load_epg(epg_url);
-
-        loop {
-            match ui::run(&channels, epg_data.as_ref())? {
-                ui::Action::Play(ch) => player::play(&ch.url, &ch.name)?,
-                ui::Action::Quit => break 'main,
-                ui::Action::AddPlaylist => {
-                    playlists.push(cache::prompt_add_playlist()?);
-                    cache::save_playlists(&playlists);
-                    active_idx = playlists.len() - 1;
-                    continue 'main;
+            let channels = m3u::parse(&content);
+            if channels.is_empty() {
+                bail!("No channels found in playlist.");
+            }
+            {
+                let mut ids: Vec<&str> = channels
+                    .iter()
+                    .filter_map(|ch| ch.tvg_id.as_deref())
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                let show = ids.len().min(8);
+                if show > 0 {
+                    eprintln!("  M3U tvg-ids (sample): {:?}", &ids[..show]);
                 }
-                ui::Action::OpenSettings => {
-                    ui::run_settings(&mut playlists)?;
-                    cache::save_playlists(&playlists);
-                    if playlists.is_empty() {
+            }
+
+            // EPG: prefer manually set URL, fall back to M3U header
+            let header_epg = m3u::parse_epg_url(&content);
+            let epg_url = playlists[active_idx]
+                .epg_url
+                .as_deref()
+                .or(header_epg.as_deref());
+            let epg_data = load_epg(epg_url);
+
+            loop {
+                match ui::run(&mut terminal, &channels, epg_data.as_ref())? {
+                    ui::Action::Play(ch) => {
+                        ui::restore_terminal(&mut terminal);
+                        player::play(&ch.url, &ch.name)?;
+                        terminal = ui::setup_terminal()?;
+                    }
+                    ui::Action::Quit => break 'main,
+                    ui::Action::AddPlaylist => {
+                        ui::restore_terminal(&mut terminal);
                         playlists.push(cache::prompt_add_playlist()?);
                         cache::save_playlists(&playlists);
+                        active_idx = playlists.len() - 1;
+                        terminal = ui::setup_terminal()?;
+                        continue 'main;
                     }
-                    active_idx = active_idx.min(playlists.len().saturating_sub(1));
-                    continue 'main;
+                    ui::Action::OpenSettings => {
+                        ui::run_settings(&mut terminal, &mut playlists)?;
+                        cache::save_playlists(&playlists);
+                        if playlists.is_empty() {
+                            ui::restore_terminal(&mut terminal);
+                            playlists.push(cache::prompt_add_playlist()?);
+                            cache::save_playlists(&playlists);
+                            terminal = ui::setup_terminal()?;
+                        }
+                        active_idx = active_idx.min(playlists.len().saturating_sub(1));
+                        continue 'main;
+                    }
                 }
             }
         }
-    }
-
-    Ok(())
+        Ok(())
+    })();
+    ui::restore_terminal(&mut terminal);
+    result
 }
 
 fn load_playlist_content(playlists: &mut [cache::PlaylistEntry], idx: usize) -> Result<String> {
