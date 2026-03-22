@@ -39,13 +39,13 @@ cargo install --git https://github.com/stanlocht/ipbeeldbuis
 Launch with a playlist URL or local file:
 
 ```bash
-ipb --source "http://your-provider.com/playlist.m3u"
+ipbeeldbuis --source "http://your-provider.com/playlist.m3u"
 ```
 
-Or just run `ipb` to use saved playlists:
+Or just run `ipbeeldbuis` to use saved playlists:
 
 ```bash
-ipb
+ipbeeldbuis
 ```
 
 ---

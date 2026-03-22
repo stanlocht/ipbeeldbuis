@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="stanlocht/ipbeeldbuis"
-BINARY="ipb"
+BINARY="ipbeeldbuis"
 INSTALL_DIR="/usr/local/bin"
 
 # Detect OS
@@ -32,7 +32,7 @@ fi
 
 URL="https://github.com/$REPO/releases/download/$LATEST/${BINARY}-${OS}-${ARCH}.tar.gz"
 
-echo "Installing ipb $LATEST ($OS/$ARCH)..."
+echo "Installing ipbeeldbuis $LATEST ($OS/$ARCH)..."
 curl -fsSL "$URL" | tar -xz -C /tmp
 
 if [ ! -f "/tmp/$BINARY" ]; then
@@ -49,4 +49,4 @@ else
 fi
 
 echo "Installed to $INSTALL_DIR/$BINARY"
-echo "Run: ipb --help"
+echo "Run: ipbeeldbuis --help"

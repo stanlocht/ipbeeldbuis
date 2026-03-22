@@ -13,13 +13,13 @@ import tarfile
 import tempfile
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 REPO = "stanlocht/ipbeeldbuis"
 
 
 def _binary_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
-    name = "ipb.exe" if sys.platform == "win32" else "ipb"
+    name = "ipbeeldbuis.exe" if sys.platform == "win32" else "ipbeeldbuis"
     return os.path.join(here, name)
 
 
@@ -52,7 +52,7 @@ def _detect_target() -> str:
 
 def _download_binary() -> None:
     target = _detect_target()
-    filename = f"ipb-{target}.tar.gz"
+    filename = f"ipbeeldbuis-{target}.tar.gz"
     url = f"https://github.com/{REPO}/releases/download/v{VERSION}/{filename}"
 
     print(f"ipbeeldbuis: downloading binary for {target}...", file=sys.stderr)
@@ -70,7 +70,7 @@ def _download_binary() -> None:
         with tarfile.open(archive, "r:gz") as tar:
             tar.extractall(tmp)
 
-        src = os.path.join(tmp, "ipb")
+        src = os.path.join(tmp, "ipbeeldbuis")
         if not os.path.exists(src):
             raise RuntimeError(f"Binary not found in archive: {filename}")
 

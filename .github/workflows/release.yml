@@ -18,20 +18,20 @@ jobs:
         include:
           - runner: macos-latest    # Apple Silicon
             target: aarch64-apple-darwin
-            artifact: ipb-macos-arm64
+            artifact: ipbeeldbuis-macos-arm64
 
           - runner: macos-latest    # Intel (cross-compiled from Apple Silicon)
             target: x86_64-apple-darwin
-            artifact: ipb-macos-x86_64
+            artifact: ipbeeldbuis-macos-x86_64
 
           - runner: ubuntu-latest   # Linux x86_64 (static musl)
             target: x86_64-unknown-linux-musl
-            artifact: ipb-linux-x86_64
+            artifact: ipbeeldbuis-linux-x86_64
             apt: musl-tools
 
           - runner: ubuntu-24.04-arm  # Linux arm64 (static musl)
             target: aarch64-unknown-linux-musl
-            artifact: ipb-linux-arm64
+            artifact: ipbeeldbuis-linux-arm64
             apt: musl-tools
 
     steps:
@@ -49,11 +49,11 @@ jobs:
 
       - name: Package
         run: |
-          BIN=target/${{ matrix.target }}/release/ipb
+          BIN=target/${{ matrix.target }}/release/ipbeeldbuis
           mkdir -p dist
-          cp "$BIN" dist/ipb
-          tar -czf dist/${{ matrix.artifact }}.tar.gz -C dist ipb
-          rm dist/ipb
+          cp "$BIN" dist/ipbeeldbuis
+          tar -czf dist/${{ matrix.artifact }}.tar.gz -C dist ipbeeldbuis
+          rm dist/ipbeeldbuis
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

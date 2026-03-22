@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ipbeeldbuis"
-version = "0.1.0"
+version = "0.1.1"
 description = "IPTV stream picker TUI"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -14,7 +14,7 @@ license = { text = "MIT" }
 Homepage = "https://github.com/stanlocht/ipbeeldbuis"
 
 [project.scripts]
-ipb = "ipbeeldbuis:main"
+ipbeeldbuis = "ipbeeldbuis:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/ipbeeldbuis"]

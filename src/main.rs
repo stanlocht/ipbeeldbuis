@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "ipb", about = "IPTV stream picker", version)]
+#[command(name = "ipbeeldbuis", about = "IPTV stream picker", version)]
 struct Cli {
     /// M3U playlist URL or local file path (bypasses persistence)
     #[arg(short, long, value_name = "URL_OR_PATH")]
