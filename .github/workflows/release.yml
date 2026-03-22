@@ -20,7 +20,7 @@ jobs:
             target: aarch64-apple-darwin
             artifact: ipb-macos-arm64
 
-          - runner: macos-13        # Intel
+          - runner: macos-latest    # Intel (cross-compiled from Apple Silicon)
             target: x86_64-apple-darwin
             artifact: ipb-macos-x86_64
 
