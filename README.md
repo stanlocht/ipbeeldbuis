@@ -24,6 +24,14 @@ uv add ipbeeldbuis
 
 The binary is downloaded automatically on first run.
 
+### uvx / pipx (no install required)
+
+```bash
+uvx ipbeeldbuis
+# or
+pipx run ipbeeldbuis
+```
+
 ### Build from source
 
 Requires [Rust](https://rustup.rs).
