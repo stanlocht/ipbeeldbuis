@@ -1,4 +1,6 @@
 mod cache;
+mod chromecast;
+mod epg;
 mod m3u;
 mod player;
 mod ui;
@@ -12,6 +14,28 @@ struct Cli {
     /// M3U playlist URL or local file path (bypasses persistence)
     #[arg(short, long, value_name = "URL_OR_PATH")]
     source: Option<String>,
+}
+
+fn load_epg(url: Option<&str>) -> Option<epg::EpgData> {
+    let url = url?;
+    eprint!("Loading EPG...");
+    match epg::load(url) {
+        Some(data) => {
+            let n = data.len();
+            eprintln!(" done ({n} channels in EPG).");
+            if n > 0 {
+                let mut sample: Vec<&str> = data.keys().map(String::as_str).collect();
+                sample.sort();
+                let show = sample.len().min(8);
+                eprintln!("  EPG IDs (sample): {:?}", &sample[..show]);
+            }
+            Some(data)
+        }
+        None => {
+            eprintln!(" failed (EPG unavailable).");
+            None
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -46,14 +70,31 @@ fn main() -> Result<()> {
             }
             bail!("No channels found in playlist.");
         }
+        let epg_url = m3u::parse_epg_url(&content);
+        let epg_data = load_epg(epg_url.as_deref());
         let mut terminal = ui::setup_terminal()?;
         let result = (|| -> Result<()> {
+            let mut cast_status: Option<String> = None;
+            let mut cast_session: Option<chromecast::CastSession> = None;
             loop {
-                match ui::run(&mut terminal, &channels)? {
+                match ui::run(
+                    &mut terminal,
+                    &channels,
+                    epg_data.as_ref(),
+                    cast_status.clone(),
+                )? {
                     ui::Action::Play(ch) => {
+                        cast_status = None;
+                        cast_session = None;
                         ui::restore_terminal(&mut terminal);
                         player::play(&ch.url, &ch.name)?;
                         terminal = ui::setup_terminal()?;
+                    }
+                    ui::Action::Cast(ch) => {
+                        handle_cast(&mut terminal, &ch, &mut cast_status, &mut cast_session)?;
+                    }
+                    ui::Action::CastControl => {
+                        handle_cast_control(&mut terminal, &mut cast_status, &mut cast_session)?;
                     }
                     ui::Action::Quit => break,
                     ui::Action::AddPlaylist | ui::Action::OpenSettings => {}
@@ -81,6 +122,8 @@ fn main() -> Result<()> {
 
     let mut terminal = ui::setup_terminal()?;
     let result = (|| -> Result<()> {
+        let mut cast_status: Option<String> = None;
+        let mut cast_session: Option<chromecast::CastSession> = None;
         'main: loop {
             let content = load_playlist_content(&mut playlists, active_idx)?;
             cache::save_playlists(&playlists);
@@ -102,12 +145,33 @@ fn main() -> Result<()> {
                 }
             }
 
+            // EPG: prefer manually set URL, fall back to M3U header
+            let header_epg = m3u::parse_epg_url(&content);
+            let epg_url = playlists[active_idx]
+                .epg_url
+                .as_deref()
+                .or(header_epg.as_deref());
+            let epg_data = load_epg(epg_url);
+
             loop {
-                match ui::run(&mut terminal, &channels)? {
+                match ui::run(
+                    &mut terminal,
+                    &channels,
+                    epg_data.as_ref(),
+                    cast_status.clone(),
+                )? {
                     ui::Action::Play(ch) => {
+                        cast_status = None;
+                        cast_session = None;
                         ui::restore_terminal(&mut terminal);
                         player::play(&ch.url, &ch.name)?;
                         terminal = ui::setup_terminal()?;
+                    }
+                    ui::Action::Cast(ch) => {
+                        handle_cast(&mut terminal, &ch, &mut cast_status, &mut cast_session)?;
+                    }
+                    ui::Action::CastControl => {
+                        handle_cast_control(&mut terminal, &mut cast_status, &mut cast_session)?;
                     }
                     ui::Action::Quit => break 'main,
                     ui::Action::AddPlaylist => {
@@ -137,6 +201,86 @@ fn main() -> Result<()> {
     })();
     ui::restore_terminal(&mut terminal);
     result
+}
+
+fn handle_cast(
+    terminal: &mut ui::Term,
+    ch: &m3u::Channel,
+    cast_status: &mut Option<String>,
+    cast_session: &mut Option<chromecast::CastSession>,
+) -> Result<()> {
+    ui::draw_cast_searching(terminal)?;
+    let devices = chromecast::discover_devices(4);
+
+    if devices.is_empty() {
+        ui::run_error_popup(terminal, "No Chromecast devices found on network.")?;
+        return Ok(());
+    }
+
+    let format = chromecast::detect_format(&ch.url);
+    if matches!(format, chromecast::StreamFormat::MpegTs) {
+        ui::run_error_popup(
+            terminal,
+            "Stream is MPEG-TS — not supported by Chromecast. Use Enter to play locally.",
+        )?;
+        return Ok(());
+    }
+
+    if let Some(idx) = ui::run_device_picker(terminal, &devices, &ch.name)? {
+        match chromecast::cast(&devices[idx], &ch.url, &ch.name) {
+            Ok(session) => {
+                *cast_status = Some(format!("Casting: {}", ch.name));
+                *cast_session = Some(session);
+            }
+            Err(e) => {
+                ui::run_error_popup(terminal, &format!("Cast failed: {e}"))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_cast_control(
+    terminal: &mut ui::Term,
+    cast_status: &mut Option<String>,
+    cast_session: &mut Option<chromecast::CastSession>,
+) -> Result<()> {
+    let device_name = match cast_session.as_ref() {
+        Some(s) => s.device_name.clone(),
+        None => return Ok(()),
+    };
+
+    match ui::run_cast_control_popup(terminal, &device_name)? {
+        ui::CastControlAction::Pause => {
+            if let Some(s) = cast_session.as_ref()
+                && let Err(e) = chromecast::pause_session(s)
+            {
+                ui::run_error_popup(terminal, &format!("Pause failed: {e}"))?;
+            }
+        }
+        ui::CastControlAction::Resume => {
+            if let Some(s) = cast_session.as_ref()
+                && let Err(e) = chromecast::resume_session(s)
+            {
+                ui::run_error_popup(terminal, &format!("Resume failed: {e}"))?;
+            }
+        }
+        ui::CastControlAction::Stop => {
+            let result = cast_session
+                .as_ref()
+                .map(chromecast::stop_session)
+                .unwrap_or(Ok(()));
+            if let Err(e) = result {
+                ui::run_error_popup(terminal, &format!("Stop failed: {e}"))?;
+            }
+            // Clear session regardless — it's no longer usable after stop
+            *cast_status = None;
+            *cast_session = None;
+        }
+        ui::CastControlAction::Cancel => {}
+    }
+    Ok(())
 }
 
 fn load_playlist_content(playlists: &mut [cache::PlaylistEntry], idx: usize) -> Result<String> {

@@ -7,6 +7,8 @@ pub struct PlaylistEntry {
     pub name: String,
     pub url: String,
     pub last_fetched: u64, // UNIX timestamp
+    #[serde(default)]
+    pub epg_url: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -90,10 +92,18 @@ pub fn prompt_add_playlist() -> Result<PlaylistEntry> {
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_string();
+    eprint!("Enter EPG URL (press Enter to skip): ");
+    let mut epg = String::new();
+    std::io::stdin().read_line(&mut epg)?;
+    let epg_url = {
+        let s = epg.trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
     Ok(PlaylistEntry {
         name,
         url,
         last_fetched: 0,
+        epg_url,
     })
 }
 
@@ -142,6 +152,7 @@ mod tests {
             name: "test".to_string(),
             url: "http://example.com/test.m3u".to_string(),
             last_fetched,
+            epg_url: None,
         }
     }
 
@@ -208,11 +219,13 @@ mod tests {
                 name: "My Playlist".to_string(),
                 url: "http://example.com/p.m3u".to_string(),
                 last_fetched: 12345,
+                epg_url: None,
             },
             PlaylistEntry {
                 name: "Another".to_string(),
                 url: "http://other.example.com/x.m3u".to_string(),
                 last_fetched: 99999,
+                epg_url: None,
             },
         ];
         let json = serde_json::to_string_pretty(&entries).unwrap();

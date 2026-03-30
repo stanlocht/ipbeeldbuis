@@ -1,4 +1,5 @@
 use crate::cache::PlaylistEntry;
+use crate::epg::{self, EpgData};
 use crate::m3u::{Channel, ContentType};
 use anyhow::Result;
 use crossterm::{
@@ -9,10 +10,10 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io::{self, Stdout};
 
@@ -35,12 +36,29 @@ const DIM: Color = Color::Rgb(100, 100, 120);
 const GROUP_COLOR: Color = Color::Rgb(180, 140, 255);
 const BG: Color = Color::Rgb(10, 10, 18);
 const HIGHLIGHT_BG: Color = Color::Rgb(25, 40, 65);
+const PURPLE: Color = Color::Rgb(180, 100, 255);
+
+#[allow(dead_code)]
+fn normalise_tvg_id(s: &str) -> String {
+    let stripped = s.rfind('@').map_or(s, |i| &s[..i]);
+    stripped.to_lowercase()
+}
 
 pub enum Action {
     Play(Channel),
+    Cast(Channel),
+    CastControl,
     Quit,
     AddPlaylist,
     OpenSettings,
+}
+
+#[derive(Clone)]
+pub enum CastControlAction {
+    Pause,
+    Resume,
+    Stop,
+    Cancel,
 }
 
 // ─── Content filter ──────────────────────────────────────────────────────────
@@ -86,6 +104,8 @@ impl ContentFilter {
 
 struct AppState<'a> {
     all_channels: &'a [Channel],
+    epg: Option<&'a EpgData>,
+    epg_visible: bool,
     groups: Vec<String>,
     group_idx: usize,
     tab_offset: usize,
@@ -94,12 +114,16 @@ struct AppState<'a> {
     search: String,
     search_mode: bool,
     content_filter: ContentFilter,
+    cast_status: Option<String>,
 }
 
 impl<'a> AppState<'a> {
-    fn new(channels: &'a [Channel]) -> Self {
+    fn new(channels: &'a [Channel], epg: Option<&'a EpgData>) -> Self {
+        let epg_visible = epg.is_some();
         let mut state = Self {
             all_channels: channels,
+            epg,
+            epg_visible,
             groups: Vec::new(),
             group_idx: 0,
             tab_offset: 0,
@@ -108,6 +132,7 @@ impl<'a> AppState<'a> {
             search: String::new(),
             search_mode: false,
             content_filter: ContentFilter::All,
+            cast_status: None,
         };
         state.rebuild_groups();
         state
@@ -203,8 +228,14 @@ impl<'a> AppState<'a> {
 
 // ─── Main TUI entry point ─────────────────────────────────────────────────────
 
-pub fn run(terminal: &mut Term, channels: &[Channel]) -> Result<Action> {
-    let mut app = AppState::new(channels);
+pub fn run(
+    terminal: &mut Term,
+    channels: &[Channel],
+    epg: Option<&EpgData>,
+    cast_status: Option<String>,
+) -> Result<Action> {
+    let mut app = AppState::new(channels, epg);
+    app.cast_status = cast_status;
     event_loop(terminal, &mut app)
 }
 
@@ -253,11 +284,23 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
                     (_, KeyCode::Char('t')) => {
                         app.cycle_content_filter();
                     }
+                    (_, KeyCode::Char('e')) => {
+                        if app.epg.is_some() {
+                            app.epg_visible = !app.epg_visible;
+                        }
+                    }
                     (_, KeyCode::Char('s')) => return Ok(Action::OpenSettings),
                     (_, KeyCode::Char('a')) => return Ok(Action::AddPlaylist),
                     (_, KeyCode::Enter) => {
                         if let Some(ch) = app.selected_channel() {
                             return Ok(Action::Play(ch.clone()));
+                        }
+                    }
+                    (_, KeyCode::Char('c')) => {
+                        if app.cast_status.is_some() {
+                            return Ok(Action::CastControl);
+                        } else if let Some(ch) = app.selected_channel() {
+                            return Ok(Action::Cast(ch.clone()));
                         }
                     }
                     _ => {}
@@ -271,6 +314,8 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
 
 struct SettingsState {
     selected: usize,
+    editing_epg: bool,
+    edit_buf: String,
 }
 
 pub fn run_settings(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
@@ -278,33 +323,67 @@ pub fn run_settings(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> 
 }
 
 fn settings_loop(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
-    let mut state = SettingsState { selected: 0 };
+    let mut state = SettingsState {
+        selected: 0,
+        editing_epg: false,
+        edit_buf: String::new(),
+    };
 
     loop {
         terminal.draw(|f| draw_settings(f, playlists, &state))?;
 
         if let Event::Key(key) = event::read()? {
-            match (key.modifiers, key.code) {
-                (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => return Ok(()),
-                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(()),
-                (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                    if !playlists.is_empty() {
-                        state.selected =
-                            (state.selected + 1).min(playlists.len().saturating_sub(1));
+            if state.editing_epg {
+                match key.code {
+                    KeyCode::Esc => {
+                        state.editing_epg = false;
+                        state.edit_buf.clear();
                     }
+                    KeyCode::Backspace => {
+                        state.edit_buf.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        state.edit_buf.push(c);
+                    }
+                    KeyCode::Enter => {
+                        if let Some(entry) = playlists.get_mut(state.selected) {
+                            let val = state.edit_buf.trim().to_string();
+                            entry.epg_url = if val.is_empty() { None } else { Some(val) };
+                        }
+                        state.editing_epg = false;
+                        state.edit_buf.clear();
+                    }
+                    _ => {}
                 }
-                (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                    state.selected = state.selected.saturating_sub(1);
-                }
-                (_, KeyCode::Char('d')) => {
-                    if !playlists.is_empty() {
-                        playlists.remove(state.selected);
-                        if state.selected > 0 && state.selected >= playlists.len() {
-                            state.selected -= 1;
+            } else {
+                match (key.modifiers, key.code) {
+                    (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => return Ok(()),
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(()),
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                        if !playlists.is_empty() {
+                            state.selected =
+                                (state.selected + 1).min(playlists.len().saturating_sub(1));
                         }
                     }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                        state.selected = state.selected.saturating_sub(1);
+                    }
+                    (_, KeyCode::Char('e')) | (_, KeyCode::Enter) => {
+                        if let Some(entry) = playlists.get(state.selected) {
+                            state.edit_buf = entry.epg_url.clone().unwrap_or_default();
+                            state.editing_epg = true;
+                        }
+                    }
+                    (_, KeyCode::Char('d')) => {
+                        if !playlists.is_empty() {
+                            playlists.remove(state.selected);
+                            if state.selected > 0 && state.selected >= playlists.len() {
+                                state.selected -= 1;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -314,13 +393,23 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let constraints: Vec<Constraint> = if state.editing_epg {
+        vec![
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(1),
-        ])
+        ]
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     // Title
@@ -369,6 +458,14 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
                     Style::default().fg(Color::White).bg(bg),
                 ),
             ]));
+            let (epg_text, epg_color) = match &entry.epg_url {
+                Some(u) => (truncate(u, inner_w), Color::White),
+                None => ("(from M3U header, or none)".to_string(), DIM),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("    EPG  ", Style::default().fg(DIM).bg(bg)),
+                Span::styled(epg_text, Style::default().fg(epg_color).bg(bg)),
+            ]));
             lines.push(Line::raw(""));
         }
     }
@@ -384,12 +481,40 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
         layout[1],
     );
 
-    f.render_widget(
-        Paragraph::new(" ↑↓/jk navigate   d delete   Esc/q back")
-            .style(Style::default().fg(DIM).bg(BG))
-            .alignment(Alignment::Center),
-        layout[2],
-    );
+    // Edit bar (only when editing EPG URL)
+    if state.editing_epg {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("EPG URL: ", Style::default().fg(DIM)),
+                Span::styled(state.edit_buf.as_str(), Style::default().fg(Color::White)),
+                Span::styled("█", Style::default().fg(ACCENT)),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT))
+                    .style(Style::default().bg(BG))
+                    .title(Span::styled(
+                        " Edit EPG URL — leave blank to clear ",
+                        Style::default().fg(DIM),
+                    )),
+            ),
+            layout[2],
+        );
+        f.render_widget(
+            Paragraph::new(" Enter save   Esc cancel")
+                .style(Style::default().fg(DIM).bg(BG))
+                .alignment(Alignment::Center),
+            layout[3],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(" ↑↓/jk navigate   e/Enter edit EPG   d delete   Esc/q back")
+                .style(Style::default().fg(DIM).bg(BG))
+                .alignment(Alignment::Center),
+            layout[2],
+        );
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -405,6 +530,130 @@ fn truncate(s: &str, max_chars: usize) -> String {
             .unwrap_or(s.len());
         format!("{}…", &s[..end])
     }
+}
+
+fn draw_epg_panel(f: &mut Frame, area: ratatui::layout::Rect, app: &AppState) {
+    let epg_data = match app.epg {
+        Some(e) => e,
+        None => return,
+    };
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(ch) = app.selected_channel() {
+        match &ch.tvg_id {
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "No tvg-id in M3U",
+                    Style::default().fg(DIM),
+                )));
+            }
+            Some(tvg_id) => {
+                lines.push(Line::from(vec![
+                    Span::styled("ID  ", Style::default().fg(DIM)),
+                    Span::styled(
+                        truncate(tvg_id, inner_width.saturating_sub(4)),
+                        Style::default().fg(DIM),
+                    ),
+                ]));
+
+                let (now_prog, next_prog) = epg::now_and_next(epg_data, tvg_id);
+
+                if now_prog.is_none() && next_prog.is_none() {
+                    lines.push(Line::from(Span::styled(
+                        "No EPG data for this ID",
+                        Style::default().fg(DIM),
+                    )));
+                }
+
+                if let Some(prog) = now_prog {
+                    lines.push(Line::from(vec![
+                        Span::styled("NOW  ", Style::default().fg(ACCENT)),
+                        Span::styled(
+                            format!(
+                                "{}–{}",
+                                epg::format_time(prog.start),
+                                epg::format_time(prog.stop)
+                            ),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        truncate(&prog.title, inner_width),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    if let Some(desc) = &prog.desc {
+                        for line in wrap_text(desc, inner_width).into_iter().take(4) {
+                            lines.push(Line::from(Span::styled(line, Style::default().fg(DIM))));
+                        }
+                    }
+                    lines.push(Line::raw(""));
+                }
+
+                if let Some(prog) = next_prog {
+                    lines.push(Line::from(vec![
+                        Span::styled("NEXT ", Style::default().fg(PURPLE)),
+                        Span::styled(
+                            format!(
+                                "{}–{}",
+                                epg::format_time(prog.start),
+                                epg::format_time(prog.stop)
+                            ),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        truncate(&prog.title, inner_width),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No channel selected",
+            Style::default().fg(DIM),
+        )));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(DIM))
+                    .style(Style::default().bg(BG))
+                    .title(Span::styled(" EPG ", Style::default().fg(ACCENT))),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in s.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 // ─── Main draw ────────────────────────────────────────────────────────────────
@@ -523,7 +772,7 @@ mod tests {
     #[test]
     fn app_state_new_empty_channels() {
         let channels: Vec<Channel> = vec![];
-        let app = AppState::new(&channels);
+        let app = AppState::new(&channels, None);
         assert_eq!(app.filtered.len(), 0);
         // groups should at least contain "All"
         assert!(app.groups.contains(&"All".to_string()));
@@ -532,7 +781,7 @@ mod tests {
     #[test]
     fn app_state_new_with_channels_selects_first() {
         let channels = sample_channels();
-        let app = AppState::new(&channels);
+        let app = AppState::new(&channels, None);
         assert_eq!(app.filtered.len(), channels.len());
         assert_eq!(app.list_state.selected(), Some(0));
     }
@@ -540,7 +789,7 @@ mod tests {
     #[test]
     fn app_state_new_builds_groups_from_channels() {
         let channels = sample_channels();
-        let app = AppState::new(&channels);
+        let app = AppState::new(&channels, None);
         // "All" + unique groups
         assert!(app.groups.contains(&"All".to_string()));
         assert!(app.groups.contains(&"News".to_string()));
@@ -554,7 +803,7 @@ mod tests {
     #[test]
     fn app_state_next_advances_selection() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.next();
         assert_eq!(app.list_state.selected(), Some(1));
     }
@@ -562,7 +811,7 @@ mod tests {
     #[test]
     fn app_state_next_stops_at_last_item() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         for _ in 0..100 {
             app.next();
         }
@@ -572,7 +821,7 @@ mod tests {
     #[test]
     fn app_state_prev_stops_at_zero() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.prev();
         assert_eq!(app.list_state.selected(), Some(0));
     }
@@ -580,7 +829,7 @@ mod tests {
     #[test]
     fn app_state_prev_goes_back() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.next();
         app.next();
         app.prev();
@@ -590,7 +839,7 @@ mod tests {
     #[test]
     fn app_state_next_on_empty_list_does_nothing() {
         let channels: Vec<Channel> = vec![];
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.next(); // should not panic
         assert_eq!(app.list_state.selected(), None);
     }
@@ -598,7 +847,7 @@ mod tests {
     #[test]
     fn app_state_prev_on_empty_list_does_nothing() {
         let channels: Vec<Channel> = vec![];
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.prev(); // should not panic
         assert_eq!(app.list_state.selected(), None);
     }
@@ -608,7 +857,7 @@ mod tests {
     #[test]
     fn app_state_next_group_advances() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         assert_eq!(app.group_idx, 0); // starts at "All"
         app.next_group();
         assert_eq!(app.group_idx, 1);
@@ -617,7 +866,7 @@ mod tests {
     #[test]
     fn app_state_next_group_wraps_around() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         let total_groups = app.groups.len();
         for _ in 0..total_groups {
             app.next_group();
@@ -628,7 +877,7 @@ mod tests {
     #[test]
     fn app_state_prev_group_wraps_around() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.prev_group();
         assert_eq!(app.group_idx, app.groups.len() - 1);
     }
@@ -636,7 +885,7 @@ mod tests {
     #[test]
     fn app_state_group_filter_restricts_channels() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         // Navigate to the "News" group
         let news_idx = app
             .groups
@@ -661,7 +910,7 @@ mod tests {
     #[test]
     fn app_state_search_filters_by_name() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.search = "bbc".to_string();
         app.refresh_filter();
         assert_eq!(app.filtered.len(), 1);
@@ -671,7 +920,7 @@ mod tests {
     #[test]
     fn app_state_search_filters_by_group() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.search = "news".to_string();
         app.refresh_filter();
         // CNN, BBC News (group "News"), and "BBC News" (name contains news)
@@ -688,7 +937,7 @@ mod tests {
     #[test]
     fn app_state_search_empty_shows_all() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.search = String::new();
         app.refresh_filter();
         assert_eq!(app.filtered.len(), channels.len());
@@ -697,7 +946,7 @@ mod tests {
     #[test]
     fn app_state_search_no_match_gives_empty_selection() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.search = "zzznomatch".to_string();
         app.refresh_filter();
         assert!(app.filtered.is_empty());
@@ -709,7 +958,7 @@ mod tests {
     #[test]
     fn cycle_content_filter_changes_filter() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         assert_eq!(app.content_filter, ContentFilter::All);
         app.cycle_content_filter();
         assert_eq!(app.content_filter, ContentFilter::Live);
@@ -718,7 +967,7 @@ mod tests {
     #[test]
     fn cycle_content_filter_restricts_channels() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         // Skip to Movie filter
         app.cycle_content_filter(); // Live
         app.cycle_content_filter(); // Movie
@@ -730,7 +979,7 @@ mod tests {
     #[test]
     fn cycle_content_filter_clears_search() {
         let channels = sample_channels();
-        let mut app = AppState::new(&channels);
+        let mut app = AppState::new(&channels, None);
         app.search = "cnn".to_string();
         app.search_mode = true;
         app.cycle_content_filter();
@@ -743,7 +992,7 @@ mod tests {
     #[test]
     fn selected_channel_returns_correct_channel() {
         let channels = sample_channels();
-        let app = AppState::new(&channels);
+        let app = AppState::new(&channels, None);
         let selected = app.selected_channel().unwrap();
         assert_eq!(selected.name, channels[0].name);
     }
@@ -751,7 +1000,7 @@ mod tests {
     #[test]
     fn selected_channel_returns_none_when_empty() {
         let channels: Vec<Channel> = vec![];
-        let app = AppState::new(&channels);
+        let app = AppState::new(&channels, None);
         assert!(app.selected_channel().is_none());
     }
 
@@ -787,6 +1036,211 @@ mod tests {
     }
 }
 
+// ─── Chromecast popups ────────────────────────────────────────────────────────
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+/// Draw a "Searching for Cast devices..." overlay and return immediately.
+pub fn draw_cast_searching(terminal: &mut Term) -> Result<()> {
+    terminal.draw(|f| {
+        let popup = centered_rect(60, 20, f.area());
+        f.render_widget(Clear, popup);
+        f.render_widget(
+            Paragraph::new("Searching for Chromecast devices on network...")
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(ACCENT))
+                        .style(Style::default().bg(BG)),
+                )
+                .alignment(Alignment::Center),
+            popup,
+        );
+    })?;
+    Ok(())
+}
+
+/// Show a device picker popup. Returns the selected device index, or None if cancelled.
+/// If only one device is found, skips the picker and returns Some(0) immediately.
+pub fn run_device_picker(
+    terminal: &mut Term,
+    devices: &[crate::chromecast::CastDevice],
+    channel_name: &str,
+) -> Result<Option<usize>> {
+    if devices.len() == 1 {
+        return Ok(Some(0));
+    }
+
+    let mut selected = 0usize;
+
+    loop {
+        terminal.draw(|f| {
+            let popup = centered_rect(60, 40, f.area());
+            f.render_widget(Clear, popup);
+
+            let items: Vec<ListItem> = devices
+                .iter()
+                .map(|d| ListItem::new(format!(" {} ", d.name)))
+                .collect();
+
+            let mut list_state = ListState::default();
+            list_state.select(Some(selected));
+
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(ACCENT))
+                            .style(Style::default().bg(BG))
+                            .title(Span::styled(
+                                format!(" Cast: {} ", channel_name),
+                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                            )),
+                    )
+                    .highlight_style(
+                        Style::default()
+                            .fg(ACCENT)
+                            .bg(HIGHLIGHT_BG)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol("▶ "),
+                popup,
+                &mut list_state,
+            );
+        })?;
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1).min(devices.len() - 1);
+                }
+                KeyCode::Enter => return Ok(Some(selected)),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Show an error popup. Blocks until any key is pressed.
+pub fn run_error_popup(terminal: &mut Term, message: &str) -> Result<()> {
+    loop {
+        terminal.draw(|f| {
+            let popup = centered_rect(60, 30, f.area());
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(message, Style::default().fg(Color::White))),
+                    Line::raw(""),
+                    Line::from(Span::styled("[Press any key]", Style::default().fg(DIM))),
+                ])
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red))
+                        .style(Style::default().bg(BG))
+                        .title(Span::styled(
+                            " Error ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        )),
+                )
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false }),
+                popup,
+            );
+        })?;
+
+        if let Event::Key(_) = event::read()? {
+            return Ok(());
+        }
+    }
+}
+
+/// Show a cast control popup (Pause / Resume / Stop). Returns the chosen action.
+pub fn run_cast_control_popup(terminal: &mut Term, device_name: &str) -> Result<CastControlAction> {
+    const OPTIONS: &[(&str, CastControlAction)] = &[
+        ("Pause", CastControlAction::Pause),
+        ("Resume", CastControlAction::Resume),
+        ("Stop", CastControlAction::Stop),
+    ];
+
+    let mut selected = 0usize;
+
+    loop {
+        terminal.draw(|f| {
+            let popup = centered_rect(50, 35, f.area());
+            f.render_widget(Clear, popup);
+
+            let items: Vec<ListItem> = OPTIONS
+                .iter()
+                .map(|(label, _)| ListItem::new(format!(" {label} ")))
+                .collect();
+
+            let mut list_state = ListState::default();
+            list_state.select(Some(selected));
+
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(ACCENT))
+                            .style(Style::default().bg(BG))
+                            .title(Span::styled(
+                                format!(" Casting: {device_name} "),
+                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                            )),
+                    )
+                    .highlight_style(
+                        Style::default()
+                            .fg(ACCENT)
+                            .bg(HIGHLIGHT_BG)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol("▶ "),
+                popup,
+                &mut list_state,
+            );
+        })?;
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => return Ok(CastControlAction::Cancel),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1).min(OPTIONS.len() - 1);
+                }
+                KeyCode::Enter => return Ok(OPTIONS[selected].1.clone()),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn draw(f: &mut Frame, app: &mut AppState) {
     let area = f.area();
 
@@ -806,22 +1260,28 @@ fn draw(f: &mut Frame, app: &mut AppState) {
     // Title bar
     let count = app.filtered.len();
     let total = app.all_channels.len();
+    let mut title_spans = vec![
+        Span::styled(
+            " ipbeeldbuis",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  [{}]", app.content_filter.label()),
+            Style::default().fg(GROUP_COLOR),
+        ),
+        Span::styled(
+            format!("  {count}/{total} channels"),
+            Style::default().fg(DIM),
+        ),
+    ];
+    if let Some(ref status) = app.cast_status {
+        title_spans.push(Span::styled(
+            format!("  {status}"),
+            Style::default().fg(ACCENT),
+        ));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ipbeeldbuis",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  [{}]", app.content_filter.label()),
-                Style::default().fg(GROUP_COLOR),
-            ),
-            Span::styled(
-                format!("  {count}/{total} channels"),
-                Style::default().fg(DIM),
-            ),
-        ]))
-        .style(Style::default().bg(BG)),
+        Paragraph::new(Line::from(title_spans)).style(Style::default().bg(BG)),
         layout[0],
     );
 
@@ -908,7 +1368,17 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         layout[2],
     );
 
-    let list_area = layout[3];
+    // Channel list ± EPG panel
+    let list_area = if app.epg_visible && app.epg.is_some() {
+        let h = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(20), Constraint::Length(40)])
+            .split(layout[3]);
+        draw_epg_panel(f, h[1], app);
+        h[0]
+    } else {
+        layout[3]
+    };
 
     let items: Vec<ListItem> = app
         .filtered
@@ -949,8 +1419,12 @@ fn draw(f: &mut Frame, app: &mut AppState) {
     // Keybinding hints
     let hints = if app.search_mode {
         " ↑↓ navigate   Esc clear   Enter confirm"
+    } else if app.cast_status.is_some() {
+        " ↑↓/jk navigate   ←→/hl tabs   / search   c cast control   Enter play locally   q quit"
+    } else if app.epg.is_some() {
+        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   e epg   c cast   s settings   a add   Enter play   q quit"
     } else {
-        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   s settings   a add   Enter play   q quit"
+        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   c cast   s settings   a add   Enter play   q quit"
     };
     f.render_widget(
         Paragraph::new(hints)
