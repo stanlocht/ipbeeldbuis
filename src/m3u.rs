@@ -29,7 +29,7 @@ impl Channel {
     }
 }
 
-fn infer_content_type(group: &str) -> ContentType {
+pub(crate) fn infer_content_type(group: &str) -> ContentType {
     let g = group.to_lowercase();
     if g.contains("serie")
         || g.contains("season")
@@ -139,14 +139,14 @@ pub fn fetch_url(url: &str) -> Result<String> {
     }
 }
 
-fn extract_display_name(extinf: &str) -> String {
+pub(crate) fn extract_display_name(extinf: &str) -> String {
     extinf
         .rfind(',')
         .map(|i| extinf[i + 1..].trim().to_string())
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
-fn extract_attr(line: &str, attr: &str) -> Option<String> {
+pub(crate) fn extract_attr(line: &str, attr: &str) -> Option<String> {
     // Case-insensitive key search (TVG-ID, tvg-id, Tvg-Id all work).
     // We compare bytes with eq_ignore_ascii_case — safe because attribute
     // keys are always ASCII. We advance a full UTF-8 char at a time so we
@@ -166,4 +166,256 @@ fn extract_attr(line: &str, attr: &str) -> Option<String> {
         i += line[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_channel(name: &str, url: &str, group: &str) -> Channel {
+        Channel {
+            name: name.to_string(),
+            url: url.to_string(),
+            group: group.to_string(),
+            logo: None,
+            tvg_id: None,
+            content_type: ContentType::Live,
+        }
+    }
+
+    // ── parse ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_empty_returns_empty() {
+        assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn parse_header_only_returns_empty() {
+        assert!(parse("#EXTM3U\n").is_empty());
+    }
+
+    #[test]
+    fn parse_single_channel_all_attributes() {
+        let m3u = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1 tvg-id=\"ch1\" tvg-logo=\"http://logo.example.com/img.png\" group-title=\"News\",Channel 1\n",
+            "http://stream.example.com/ch1\n"
+        );
+        let channels = parse(m3u);
+        assert_eq!(channels.len(), 1);
+        let ch = &channels[0];
+        assert_eq!(ch.name, "Channel 1");
+        assert_eq!(ch.url, "http://stream.example.com/ch1");
+        assert_eq!(ch.group, "News");
+        assert_eq!(ch.logo, Some("http://logo.example.com/img.png".to_string()));
+        assert_eq!(ch.tvg_id, Some("ch1".to_string()));
+        assert_eq!(ch.content_type, ContentType::Live);
+    }
+
+    #[test]
+    fn parse_multiple_channels() {
+        let m3u = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1,Alpha\n",
+            "http://example.com/1\n",
+            "#EXTINF:-1,Beta\n",
+            "http://example.com/2\n",
+        );
+        let channels = parse(m3u);
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].name, "Alpha");
+        assert_eq!(channels[0].url, "http://example.com/1");
+        assert_eq!(channels[1].name, "Beta");
+        assert_eq!(channels[1].url, "http://example.com/2");
+    }
+
+    #[test]
+    fn parse_skips_channel_with_no_url() {
+        let m3u = "#EXTM3U\n#EXTINF:-1,Channel 1\n";
+        assert!(parse(m3u).is_empty());
+    }
+
+    #[test]
+    fn parse_skips_comment_between_extinf_and_url() {
+        let m3u = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1,Channel 1\n",
+            "# this is a comment\n",
+            "http://example.com/1\n",
+        );
+        let channels = parse(m3u);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].url, "http://example.com/1");
+    }
+
+    #[test]
+    fn parse_skips_blank_lines_between_extinf_and_url() {
+        let m3u = "#EXTM3U\n#EXTINF:-1,Channel 1\n\n\nhttp://example.com/1\n";
+        let channels = parse(m3u);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].url, "http://example.com/1");
+    }
+
+    #[test]
+    fn parse_attributes_are_case_insensitive() {
+        let m3u = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1 TVG-ID=\"id1\" TVG-LOGO=\"http://logo.example.com/\" GROUP-TITLE=\"Sports\",Chan\n",
+            "http://example.com/1\n",
+        );
+        let channels = parse(m3u);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].tvg_id, Some("id1".to_string()));
+        assert_eq!(
+            channels[0].logo,
+            Some("http://logo.example.com/".to_string())
+        );
+        assert_eq!(channels[0].group, "Sports");
+    }
+
+    #[test]
+    fn parse_name_is_text_after_last_comma() {
+        let m3u = "#EXTM3U\n#EXTINF:-1 group-title=\"A,B\",My Channel, HD\nhttp://example.com/1\n";
+        let channels = parse(m3u);
+        assert_eq!(channels[0].name, "HD");
+    }
+
+    #[test]
+    fn parse_name_is_unknown_when_no_comma() {
+        let m3u = "#EXTM3U\n#EXTINF:-1\nhttp://example.com/1\n";
+        let channels = parse(m3u);
+        assert_eq!(channels[0].name, "Unknown");
+    }
+
+    #[test]
+    fn parse_missing_optional_attrs_are_none() {
+        let m3u = "#EXTM3U\n#EXTINF:-1,Channel\nhttp://example.com/1\n";
+        let channels = parse(m3u);
+        assert_eq!(channels[0].logo, None);
+        assert_eq!(channels[0].tvg_id, None);
+    }
+
+    // ── infer_content_type ───────────────────────────────────────────────────
+
+    #[test]
+    fn infer_series_keywords() {
+        for kw in &["serie", "Series", "SEASON", "Episode", "show", "tvshow"] {
+            assert_eq!(
+                infer_content_type(kw),
+                ContentType::Series,
+                "expected Series for {kw}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_movie_keywords() {
+        for kw in &["movie", "Movies", "FILM", "VOD", "Cinema", "4K Movie"] {
+            assert_eq!(
+                infer_content_type(kw),
+                ContentType::Movie,
+                "expected Movie for {kw}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_live_is_default() {
+        for kw in &["Sports", "News", "Entertainment", "Kids", ""] {
+            assert_eq!(
+                infer_content_type(kw),
+                ContentType::Live,
+                "expected Live for {kw}"
+            );
+        }
+    }
+
+    // ── extract_display_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_display_name_after_last_comma() {
+        assert_eq!(
+            extract_display_name("#EXTINF:-1 group-title=\"x\",My Channel"),
+            "My Channel"
+        );
+    }
+
+    #[test]
+    fn extract_display_name_trims_whitespace() {
+        assert_eq!(extract_display_name("#EXTINF:-1,  Channel  "), "Channel");
+    }
+
+    #[test]
+    fn extract_display_name_no_comma_gives_unknown() {
+        assert_eq!(extract_display_name("#EXTINF:-1"), "Unknown");
+    }
+
+    // ── extract_attr ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_attr_finds_value() {
+        assert_eq!(
+            extract_attr(r#"#EXTINF:-1 group-title="News","#, "group-title"),
+            Some("News".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_attr_case_insensitive_key() {
+        assert_eq!(
+            extract_attr(r#"#EXTINF:-1 GROUP-TITLE="Sports","#, "group-title"),
+            Some("Sports".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_attr_returns_none_when_missing() {
+        assert_eq!(extract_attr("#EXTINF:-1,Channel", "tvg-id"), None);
+    }
+
+    #[test]
+    fn extract_attr_returns_none_for_empty_value() {
+        assert_eq!(extract_attr(r#"#EXTINF:-1 tvg-id="","#, "tvg-id"), None);
+    }
+
+    #[test]
+    fn extract_attr_handles_unicode_in_values() {
+        assert_eq!(
+            extract_attr(r#"#EXTINF:-1 group-title="Téléfilm","#, "group-title"),
+            Some("Téléfilm".to_string())
+        );
+    }
+
+    // ── Channel::display_group ───────────────────────────────────────────────
+
+    #[test]
+    fn display_group_empty_returns_uncategorized() {
+        let ch = make_channel("Test", "http://x.com", "");
+        assert_eq!(ch.display_group(), "Uncategorized");
+    }
+
+    #[test]
+    fn display_group_nonempty_returns_group() {
+        let ch = make_channel("Test", "http://x.com", "Sports");
+        assert_eq!(ch.display_group(), "Sports");
+    }
+
+    // ── fetch_or_read_raw ────────────────────────────────────────────────────
+
+    #[test]
+    fn fetch_or_read_raw_reads_existing_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let content = "#EXTM3U\n#EXTINF:-1,Test\nhttp://example.com\n";
+        tmp.write_all(content.as_bytes()).unwrap();
+        let result = fetch_or_read_raw(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn fetch_or_read_raw_errors_on_missing_file() {
+        let result = fetch_or_read_raw("/tmp/__ipbeeldbuis_no_such_file_xyz.m3u");
+        assert!(result.is_err());
+    }
 }

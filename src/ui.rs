@@ -446,6 +446,347 @@ fn adjust_tab_offset(app: &mut AppState, avail_w: usize) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::m3u::{Channel, ContentType};
+
+    fn make_channel(name: &str, group: &str, ct: ContentType) -> Channel {
+        Channel {
+            name: name.to_string(),
+            url: format!("http://example.com/{name}"),
+            group: group.to_string(),
+            logo: None,
+            tvg_id: None,
+            content_type: ct,
+        }
+    }
+
+    fn sample_channels() -> Vec<Channel> {
+        vec![
+            make_channel("CNN", "News", ContentType::Live),
+            make_channel("BBC News", "News", ContentType::Live),
+            make_channel("Inception", "Movies", ContentType::Movie),
+            make_channel("Breaking Bad S01E01", "US Series", ContentType::Series),
+            make_channel("ESPN", "Sports", ContentType::Live),
+        ]
+    }
+
+    // ── ContentFilter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn content_filter_labels() {
+        assert_eq!(ContentFilter::All.label(), "All");
+        assert_eq!(ContentFilter::Live.label(), "Live Channels");
+        assert_eq!(ContentFilter::Movie.label(), "Movies");
+        assert_eq!(ContentFilter::Series.label(), "Series");
+    }
+
+    #[test]
+    fn content_filter_next_cycles_all_variants() {
+        assert_eq!(ContentFilter::All.next(), ContentFilter::Live);
+        assert_eq!(ContentFilter::Live.next(), ContentFilter::Movie);
+        assert_eq!(ContentFilter::Movie.next(), ContentFilter::Series);
+        assert_eq!(ContentFilter::Series.next(), ContentFilter::All);
+    }
+
+    #[test]
+    fn content_filter_matches_all_accepts_any() {
+        assert!(ContentFilter::All.matches(&ContentType::Live));
+        assert!(ContentFilter::All.matches(&ContentType::Movie));
+        assert!(ContentFilter::All.matches(&ContentType::Series));
+    }
+
+    #[test]
+    fn content_filter_matches_live_only() {
+        assert!(ContentFilter::Live.matches(&ContentType::Live));
+        assert!(!ContentFilter::Live.matches(&ContentType::Movie));
+        assert!(!ContentFilter::Live.matches(&ContentType::Series));
+    }
+
+    #[test]
+    fn content_filter_matches_movie_only() {
+        assert!(ContentFilter::Movie.matches(&ContentType::Movie));
+        assert!(!ContentFilter::Movie.matches(&ContentType::Live));
+        assert!(!ContentFilter::Movie.matches(&ContentType::Series));
+    }
+
+    #[test]
+    fn content_filter_matches_series_only() {
+        assert!(ContentFilter::Series.matches(&ContentType::Series));
+        assert!(!ContentFilter::Series.matches(&ContentType::Live));
+        assert!(!ContentFilter::Series.matches(&ContentType::Movie));
+    }
+
+    // ── AppState::new ────────────────────────────────────────────────────────
+
+    #[test]
+    fn app_state_new_empty_channels() {
+        let channels: Vec<Channel> = vec![];
+        let app = AppState::new(&channels);
+        assert_eq!(app.filtered.len(), 0);
+        // groups should at least contain "All"
+        assert!(app.groups.contains(&"All".to_string()));
+    }
+
+    #[test]
+    fn app_state_new_with_channels_selects_first() {
+        let channels = sample_channels();
+        let app = AppState::new(&channels);
+        assert_eq!(app.filtered.len(), channels.len());
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn app_state_new_builds_groups_from_channels() {
+        let channels = sample_channels();
+        let app = AppState::new(&channels);
+        // "All" + unique groups
+        assert!(app.groups.contains(&"All".to_string()));
+        assert!(app.groups.contains(&"News".to_string()));
+        assert!(app.groups.contains(&"Movies".to_string()));
+        assert!(app.groups.contains(&"US Series".to_string()));
+        assert!(app.groups.contains(&"Sports".to_string()));
+    }
+
+    // ── AppState navigation ──────────────────────────────────────────────────
+
+    #[test]
+    fn app_state_next_advances_selection() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.next();
+        assert_eq!(app.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn app_state_next_stops_at_last_item() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        for _ in 0..100 {
+            app.next();
+        }
+        assert_eq!(app.list_state.selected(), Some(channels.len() - 1));
+    }
+
+    #[test]
+    fn app_state_prev_stops_at_zero() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.prev();
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn app_state_prev_goes_back() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.next();
+        app.next();
+        app.prev();
+        assert_eq!(app.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn app_state_next_on_empty_list_does_nothing() {
+        let channels: Vec<Channel> = vec![];
+        let mut app = AppState::new(&channels);
+        app.next(); // should not panic
+        assert_eq!(app.list_state.selected(), None);
+    }
+
+    #[test]
+    fn app_state_prev_on_empty_list_does_nothing() {
+        let channels: Vec<Channel> = vec![];
+        let mut app = AppState::new(&channels);
+        app.prev(); // should not panic
+        assert_eq!(app.list_state.selected(), None);
+    }
+
+    // ── Group navigation ─────────────────────────────────────────────────────
+
+    #[test]
+    fn app_state_next_group_advances() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        assert_eq!(app.group_idx, 0); // starts at "All"
+        app.next_group();
+        assert_eq!(app.group_idx, 1);
+    }
+
+    #[test]
+    fn app_state_next_group_wraps_around() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        let total_groups = app.groups.len();
+        for _ in 0..total_groups {
+            app.next_group();
+        }
+        assert_eq!(app.group_idx, 0);
+    }
+
+    #[test]
+    fn app_state_prev_group_wraps_around() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.prev_group();
+        assert_eq!(app.group_idx, app.groups.len() - 1);
+    }
+
+    #[test]
+    fn app_state_group_filter_restricts_channels() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        // Navigate to the "News" group
+        let news_idx = app
+            .groups
+            .iter()
+            .position(|g| g == "News")
+            .expect("News group should exist");
+        app.group_idx = news_idx;
+        app.refresh_filter();
+        // Only CNN and BBC News are in "News"
+        assert_eq!(app.filtered.len(), 2);
+        let names: Vec<&str> = app
+            .filtered
+            .iter()
+            .map(|&i| channels[i].name.as_str())
+            .collect();
+        assert!(names.contains(&"CNN"));
+        assert!(names.contains(&"BBC News"));
+    }
+
+    // ── Search filtering ─────────────────────────────────────────────────────
+
+    #[test]
+    fn app_state_search_filters_by_name() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.search = "bbc".to_string();
+        app.refresh_filter();
+        assert_eq!(app.filtered.len(), 1);
+        assert_eq!(channels[app.filtered[0]].name, "BBC News");
+    }
+
+    #[test]
+    fn app_state_search_filters_by_group() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.search = "news".to_string();
+        app.refresh_filter();
+        // CNN, BBC News (group "News"), and "BBC News" (name contains news)
+        // Both channels in the "News" group match, plus ESPN doesn't match
+        let names: Vec<&str> = app
+            .filtered
+            .iter()
+            .map(|&i| channels[i].name.as_str())
+            .collect();
+        assert!(names.contains(&"CNN"));
+        assert!(names.contains(&"BBC News"));
+    }
+
+    #[test]
+    fn app_state_search_empty_shows_all() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.search = String::new();
+        app.refresh_filter();
+        assert_eq!(app.filtered.len(), channels.len());
+    }
+
+    #[test]
+    fn app_state_search_no_match_gives_empty_selection() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.search = "zzznomatch".to_string();
+        app.refresh_filter();
+        assert!(app.filtered.is_empty());
+        assert_eq!(app.list_state.selected(), None);
+    }
+
+    // ── Content filter cycling ───────────────────────────────────────────────
+
+    #[test]
+    fn cycle_content_filter_changes_filter() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        assert_eq!(app.content_filter, ContentFilter::All);
+        app.cycle_content_filter();
+        assert_eq!(app.content_filter, ContentFilter::Live);
+    }
+
+    #[test]
+    fn cycle_content_filter_restricts_channels() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        // Skip to Movie filter
+        app.cycle_content_filter(); // Live
+        app.cycle_content_filter(); // Movie
+        assert_eq!(app.content_filter, ContentFilter::Movie);
+        assert_eq!(app.filtered.len(), 1);
+        assert_eq!(channels[app.filtered[0]].name, "Inception");
+    }
+
+    #[test]
+    fn cycle_content_filter_clears_search() {
+        let channels = sample_channels();
+        let mut app = AppState::new(&channels);
+        app.search = "cnn".to_string();
+        app.search_mode = true;
+        app.cycle_content_filter();
+        assert!(app.search.is_empty());
+        assert!(!app.search_mode);
+    }
+
+    // ── selected_channel ─────────────────────────────────────────────────────
+
+    #[test]
+    fn selected_channel_returns_correct_channel() {
+        let channels = sample_channels();
+        let app = AppState::new(&channels);
+        let selected = app.selected_channel().unwrap();
+        assert_eq!(selected.name, channels[0].name);
+    }
+
+    #[test]
+    fn selected_channel_returns_none_when_empty() {
+        let channels: Vec<Channel> = vec![];
+        let app = AppState::new(&channels);
+        assert!(app.selected_channel().is_none());
+    }
+
+    // ── truncate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_length_unchanged() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string_gets_ellipsis() {
+        let result = truncate("hello world", 5);
+        assert!(result.ends_with('…'));
+        assert!(result.chars().count() <= 6); // 5 chars + ellipsis
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn truncate_handles_unicode() {
+        // "héllo" is 5 chars
+        let result = truncate("héllo world", 5);
+        assert!(result.ends_with('…'));
+    }
+}
+
 fn draw(f: &mut Frame, app: &mut AppState) {
     let area = f.area();
 

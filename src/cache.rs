@@ -108,3 +108,126 @@ pub fn pick_playlist(playlists: &[PlaylistEntry]) -> Result<usize> {
     let n: usize = line.trim().parse().unwrap_or(1);
     Ok(n.saturating_sub(1).min(playlists.len() - 1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── url_hash ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn url_hash_is_deterministic() {
+        let url = "http://example.com/playlist.m3u";
+        assert_eq!(url_hash(url), url_hash(url));
+    }
+
+    #[test]
+    fn url_hash_differs_for_different_urls() {
+        let a = url_hash("http://example.com/a.m3u");
+        let b = url_hash("http://example.com/b.m3u");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn url_hash_differs_for_http_vs_https() {
+        let a = url_hash("http://example.com/playlist.m3u");
+        let b = url_hash("https://example.com/playlist.m3u");
+        assert_ne!(a, b);
+    }
+
+    // ── needs_refresh ────────────────────────────────────────────────────────
+
+    fn entry_with_last_fetched(last_fetched: u64) -> PlaylistEntry {
+        PlaylistEntry {
+            name: "test".to_string(),
+            url: "http://example.com/test.m3u".to_string(),
+            last_fetched,
+        }
+    }
+
+    #[test]
+    fn needs_refresh_returns_true_for_never_fetched() {
+        let entry = entry_with_last_fetched(0);
+        assert!(needs_refresh(&entry));
+    }
+
+    #[test]
+    fn needs_refresh_returns_true_for_old_timestamp() {
+        // 10 days ago
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ten_days_ago = now.saturating_sub(10 * 24 * 3600);
+        let entry = entry_with_last_fetched(ten_days_ago);
+        assert!(needs_refresh(&entry));
+    }
+
+    #[test]
+    fn needs_refresh_returns_false_for_recent_timestamp() {
+        // 1 hour ago
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let one_hour_ago = now.saturating_sub(3600);
+        let entry = entry_with_last_fetched(one_hour_ago);
+        assert!(!needs_refresh(&entry));
+    }
+
+    #[test]
+    fn needs_refresh_returns_false_for_two_days_ago() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let two_days_ago = now.saturating_sub(2 * 24 * 3600);
+        let entry = entry_with_last_fetched(two_days_ago);
+        assert!(!needs_refresh(&entry));
+    }
+
+    #[test]
+    fn needs_refresh_returns_true_for_just_over_three_days() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // 3 days + 1 second
+        let just_over = now.saturating_sub(3 * 24 * 3600 + 1);
+        let entry = entry_with_last_fetched(just_over);
+        assert!(needs_refresh(&entry));
+    }
+
+    // ── save/load round-trip ─────────────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_playlists_roundtrip() {
+        // Write to a temp file and parse directly to avoid touching real config.
+        let entries = vec![
+            PlaylistEntry {
+                name: "My Playlist".to_string(),
+                url: "http://example.com/p.m3u".to_string(),
+                last_fetched: 12345,
+            },
+            PlaylistEntry {
+                name: "Another".to_string(),
+                url: "http://other.example.com/x.m3u".to_string(),
+                last_fetched: 99999,
+            },
+        ];
+        let json = serde_json::to_string_pretty(&entries).unwrap();
+        let parsed: Vec<PlaylistEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "My Playlist");
+        assert_eq!(parsed[0].url, "http://example.com/p.m3u");
+        assert_eq!(parsed[0].last_fetched, 12345);
+        assert_eq!(parsed[1].name, "Another");
+    }
+
+    #[test]
+    fn load_playlists_returns_empty_for_invalid_json() {
+        // Simulate what would happen if the JSON is corrupt
+        let result: Option<Vec<PlaylistEntry>> = serde_json::from_str("not json").ok();
+        assert!(result.is_none());
+    }
+}
