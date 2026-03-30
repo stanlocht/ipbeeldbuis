@@ -1,5 +1,4 @@
 mod cache;
-mod epg;
 mod m3u;
 mod player;
 mod ui;
@@ -13,28 +12,6 @@ struct Cli {
     /// M3U playlist URL or local file path (bypasses persistence)
     #[arg(short, long, value_name = "URL_OR_PATH")]
     source: Option<String>,
-}
-
-fn load_epg(url: Option<&str>) -> Option<epg::EpgData> {
-    let url = url?;
-    eprint!("Loading EPG...");
-    match epg::load(url) {
-        Some(data) => {
-            let n = data.len();
-            eprintln!(" done ({n} channels in EPG).");
-            if n > 0 {
-                let mut sample: Vec<&str> = data.keys().map(String::as_str).collect();
-                sample.sort();
-                let show = sample.len().min(8);
-                eprintln!("  EPG IDs (sample): {:?}", &sample[..show]);
-            }
-            Some(data)
-        }
-        None => {
-            eprintln!(" failed (EPG unavailable).");
-            None
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -69,12 +46,10 @@ fn main() -> Result<()> {
             }
             bail!("No channels found in playlist.");
         }
-        let epg_url = m3u::parse_epg_url(&content);
-        let epg_data = load_epg(epg_url.as_deref());
         let mut terminal = ui::setup_terminal()?;
         let result = (|| -> Result<()> {
             loop {
-                match ui::run(&mut terminal, &channels, epg_data.as_ref())? {
+                match ui::run(&mut terminal, &channels)? {
                     ui::Action::Play(ch) => {
                         ui::restore_terminal(&mut terminal);
                         player::play(&ch.url, &ch.name)?;
@@ -127,16 +102,8 @@ fn main() -> Result<()> {
                 }
             }
 
-            // EPG: prefer manually set URL, fall back to M3U header
-            let header_epg = m3u::parse_epg_url(&content);
-            let epg_url = playlists[active_idx]
-                .epg_url
-                .as_deref()
-                .or(header_epg.as_deref());
-            let epg_data = load_epg(epg_url);
-
             loop {
-                match ui::run(&mut terminal, &channels, epg_data.as_ref())? {
+                match ui::run(&mut terminal, &channels)? {
                     ui::Action::Play(ch) => {
                         ui::restore_terminal(&mut terminal);
                         player::play(&ch.url, &ch.name)?;

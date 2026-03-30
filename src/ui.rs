@@ -1,5 +1,4 @@
 use crate::cache::PlaylistEntry;
-use crate::epg::{self, EpgData};
 use crate::m3u::{Channel, ContentType};
 use anyhow::Result;
 use crossterm::{
@@ -13,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::io::{self, Stdout};
 
@@ -36,12 +35,6 @@ const DIM: Color = Color::Rgb(100, 100, 120);
 const GROUP_COLOR: Color = Color::Rgb(180, 140, 255);
 const BG: Color = Color::Rgb(10, 10, 18);
 const HIGHLIGHT_BG: Color = Color::Rgb(25, 40, 65);
-const PURPLE: Color = Color::Rgb(180, 100, 255);
-
-fn normalise_tvg_id(s: &str) -> String {
-    let stripped = s.rfind('@').map_or(s, |i| &s[..i]);
-    stripped.to_lowercase()
-}
 
 pub enum Action {
     Play(Channel),
@@ -93,11 +86,6 @@ impl ContentFilter {
 
 struct AppState<'a> {
     all_channels: &'a [Channel],
-    epg: Option<&'a EpgData>,
-    epg_visible: bool,
-    epg_only: bool,
-    show_epg_info: bool,
-    epg_info_scroll: usize,
     groups: Vec<String>,
     group_idx: usize,
     tab_offset: usize,
@@ -109,15 +97,9 @@ struct AppState<'a> {
 }
 
 impl<'a> AppState<'a> {
-    fn new(channels: &'a [Channel], epg: Option<&'a EpgData>) -> Self {
-        let epg_visible = epg.is_some();
+    fn new(channels: &'a [Channel]) -> Self {
         let mut state = Self {
             all_channels: channels,
-            epg,
-            epg_visible,
-            epg_only: false,
-            show_epg_info: false,
-            epg_info_scroll: 0,
             groups: Vec::new(),
             group_idx: 0,
             tab_offset: 0,
@@ -162,19 +144,7 @@ impl<'a> AppState<'a> {
                 let search_ok = query.is_empty()
                     || ch.name.to_lowercase().contains(&query)
                     || ch.display_group().to_lowercase().contains(&query);
-                let epg_ok = !self.epg_only
-                    || match (self.epg, &ch.tvg_id) {
-                        (Some(epg_data), Some(tvg_id)) => {
-                            let id_lower = tvg_id.to_lowercase();
-                            let id_norm = normalise_tvg_id(tvg_id);
-                            epg_data.contains_key(tvg_id.as_str())
-                                || epg_data.keys().any(|k| {
-                                    k.to_lowercase() == id_lower || normalise_tvg_id(k) == id_norm
-                                })
-                        }
-                        _ => false,
-                    };
-                content_ok && group_ok && search_ok && epg_ok
+                content_ok && group_ok && search_ok
             })
             .map(|(i, _)| i)
             .collect();
@@ -229,19 +199,12 @@ impl<'a> AppState<'a> {
         self.search_mode = false;
         self.rebuild_groups();
     }
-
-    fn toggle_epg_filter(&mut self) {
-        if self.epg.is_some() {
-            self.epg_only = !self.epg_only;
-            self.refresh_filter();
-        }
-    }
 }
 
 // ─── Main TUI entry point ─────────────────────────────────────────────────────
 
-pub fn run(terminal: &mut Term, channels: &[Channel], epg: Option<&EpgData>) -> Result<Action> {
-    let mut app = AppState::new(channels, epg);
+pub fn run(terminal: &mut Term, channels: &[Channel]) -> Result<Action> {
+    let mut app = AppState::new(channels);
     event_loop(terminal, &mut app)
 }
 
@@ -250,24 +213,6 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
         terminal.draw(|f| draw(f, app))?;
 
         if let Event::Key(key) = event::read()? {
-            // EPG info overlay intercepts all keys
-            if app.show_epg_info {
-                match key.code {
-                    KeyCode::Char('i') | KeyCode::Esc | KeyCode::Char('q') => {
-                        app.show_epg_info = false;
-                        app.epg_info_scroll = 0;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.epg_info_scroll = app.epg_info_scroll.saturating_add(1);
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.epg_info_scroll = app.epg_info_scroll.saturating_sub(1);
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
             if app.search_mode {
                 match key.code {
                     KeyCode::Esc => {
@@ -308,20 +253,6 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
                     (_, KeyCode::Char('t')) => {
                         app.cycle_content_filter();
                     }
-                    (_, KeyCode::Char('e')) => {
-                        if app.epg.is_some() {
-                            app.epg_visible = !app.epg_visible;
-                        }
-                    }
-                    (_, KeyCode::Char('f')) => {
-                        app.toggle_epg_filter();
-                    }
-                    (_, KeyCode::Char('i')) => {
-                        if app.epg.is_some() {
-                            app.show_epg_info = true;
-                            app.epg_info_scroll = 0;
-                        }
-                    }
                     (_, KeyCode::Char('s')) => return Ok(Action::OpenSettings),
                     (_, KeyCode::Char('a')) => return Ok(Action::AddPlaylist),
                     (_, KeyCode::Enter) => {
@@ -340,8 +271,6 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
 
 struct SettingsState {
     selected: usize,
-    editing_epg: bool,
-    edit_buf: String,
 }
 
 pub fn run_settings(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
@@ -349,67 +278,33 @@ pub fn run_settings(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> 
 }
 
 fn settings_loop(terminal: &mut Term, playlists: &mut Vec<PlaylistEntry>) -> Result<()> {
-    let mut state = SettingsState {
-        selected: 0,
-        editing_epg: false,
-        edit_buf: String::new(),
-    };
+    let mut state = SettingsState { selected: 0 };
 
     loop {
         terminal.draw(|f| draw_settings(f, playlists, &state))?;
 
         if let Event::Key(key) = event::read()? {
-            if state.editing_epg {
-                match key.code {
-                    KeyCode::Esc => {
-                        state.editing_epg = false;
-                        state.edit_buf.clear();
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => return Ok(()),
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(()),
+                (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                    if !playlists.is_empty() {
+                        state.selected =
+                            (state.selected + 1).min(playlists.len().saturating_sub(1));
                     }
-                    KeyCode::Backspace => {
-                        state.edit_buf.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        state.edit_buf.push(c);
-                    }
-                    KeyCode::Enter => {
-                        if let Some(entry) = playlists.get_mut(state.selected) {
-                            let val = state.edit_buf.trim().to_string();
-                            entry.epg_url = if val.is_empty() { None } else { Some(val) };
-                        }
-                        state.editing_epg = false;
-                        state.edit_buf.clear();
-                    }
-                    _ => {}
                 }
-            } else {
-                match (key.modifiers, key.code) {
-                    (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => return Ok(()),
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(()),
-                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                        if !playlists.is_empty() {
-                            state.selected =
-                                (state.selected + 1).min(playlists.len().saturating_sub(1));
-                        }
-                    }
-                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                        state.selected = state.selected.saturating_sub(1);
-                    }
-                    (_, KeyCode::Char('e')) | (_, KeyCode::Enter) => {
-                        if let Some(entry) = playlists.get(state.selected) {
-                            state.edit_buf = entry.epg_url.clone().unwrap_or_default();
-                            state.editing_epg = true;
-                        }
-                    }
-                    (_, KeyCode::Char('d')) => {
-                        if !playlists.is_empty() {
-                            playlists.remove(state.selected);
-                            if state.selected > 0 && state.selected >= playlists.len() {
-                                state.selected -= 1;
-                            }
-                        }
-                    }
-                    _ => {}
+                (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                    state.selected = state.selected.saturating_sub(1);
                 }
+                (_, KeyCode::Char('d')) => {
+                    if !playlists.is_empty() {
+                        playlists.remove(state.selected);
+                        if state.selected > 0 && state.selected >= playlists.len() {
+                            state.selected -= 1;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -419,23 +314,13 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    let constraints: Vec<Constraint> = if state.editing_epg {
-        vec![
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ]
-    } else {
-        vec![
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ]
-    };
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     // Title
@@ -484,14 +369,6 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
                     Style::default().fg(Color::White).bg(bg),
                 ),
             ]));
-            let (epg_text, epg_color) = match &entry.epg_url {
-                Some(u) => (truncate(u, inner_w), Color::White),
-                None => ("(from M3U header, or none)".to_string(), DIM),
-            };
-            lines.push(Line::from(vec![
-                Span::styled("    EPG  ", Style::default().fg(DIM).bg(bg)),
-                Span::styled(epg_text, Style::default().fg(epg_color).bg(bg)),
-            ]));
             lines.push(Line::raw(""));
         }
     }
@@ -507,40 +384,12 @@ fn draw_settings(f: &mut Frame, playlists: &[PlaylistEntry], state: &SettingsSta
         layout[1],
     );
 
-    // Edit bar (only when editing EPG URL)
-    if state.editing_epg {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("EPG URL: ", Style::default().fg(DIM)),
-                Span::styled(state.edit_buf.as_str(), Style::default().fg(Color::White)),
-                Span::styled("█", Style::default().fg(ACCENT)),
-            ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(ACCENT))
-                    .style(Style::default().bg(BG))
-                    .title(Span::styled(
-                        " Edit EPG URL — leave blank to clear ",
-                        Style::default().fg(DIM),
-                    )),
-            ),
-            layout[2],
-        );
-        f.render_widget(
-            Paragraph::new(" Enter save   Esc cancel")
-                .style(Style::default().fg(DIM).bg(BG))
-                .alignment(Alignment::Center),
-            layout[3],
-        );
-    } else {
-        f.render_widget(
-            Paragraph::new(" ↑↓/jk navigate   e/Enter edit EPG   d delete   Esc/q back")
-                .style(Style::default().fg(DIM).bg(BG))
-                .alignment(Alignment::Center),
-            layout[2],
-        );
-    }
+    f.render_widget(
+        Paragraph::new(" ↑↓/jk navigate   d delete   Esc/q back")
+            .style(Style::default().fg(DIM).bg(BG))
+            .alignment(Alignment::Center),
+        layout[2],
+    );
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -556,281 +405,6 @@ fn truncate(s: &str, max_chars: usize) -> String {
             .unwrap_or(s.len());
         format!("{}…", &s[..end])
     }
-}
-
-fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in s.split_whitespace() {
-        if current.is_empty() {
-            current = word.to_string();
-        } else if current.len() + 1 + word.len() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(current);
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-fn draw_epg_info_overlay(f: &mut Frame, app: &AppState) {
-    use ratatui::layout::Rect;
-
-    let area = f.area();
-    // Centered box: 80% width, 80% height
-    let w = (area.width * 4 / 5).max(40);
-    let h = (area.height * 4 / 5).max(10);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    let inner_w = popup.width.saturating_sub(4) as usize;
-    let inner_h = popup.height.saturating_sub(2) as usize; // rows available for content
-
-    // Build content lines
-    let mut lines: Vec<Line> = Vec::new();
-
-    // EPG side
-    let epg_ids: Vec<String> = if let Some(epg) = app.epg {
-        let mut ids: Vec<String> = epg.keys().cloned().collect();
-        ids.sort();
-        ids
-    } else {
-        vec![]
-    };
-
-    // M3U tvg-id side
-    let mut m3u_ids: Vec<&str> = app
-        .all_channels
-        .iter()
-        .filter_map(|ch| ch.tvg_id.as_deref())
-        .collect();
-    m3u_ids.sort();
-    m3u_ids.dedup();
-
-    let epg_count = epg_ids.len();
-    let m3u_count = m3u_ids.len();
-
-    // Count matches
-    let match_count = m3u_ids
-        .iter()
-        .filter(|&&id| {
-            let id_lower = id.to_lowercase();
-            let id_norm = normalise_tvg_id(id);
-            epg_ids
-                .iter()
-                .any(|k| k == id || k.to_lowercase() == id_lower || normalise_tvg_id(k) == id_norm)
-        })
-        .count();
-
-    lines.push(Line::from(vec![
-        Span::styled("EPG channels: ", Style::default().fg(DIM)),
-        Span::styled(
-            epg_count.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   M3U tvg-ids: ", Style::default().fg(DIM)),
-        Span::styled(
-            m3u_count.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   Matched: ", Style::default().fg(DIM)),
-        Span::styled(
-            match_count.to_string(),
-            Style::default()
-                .fg(if match_count > 0 {
-                    Color::Green
-                } else {
-                    Color::Red
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::raw(""));
-
-    let col_w = inner_w / 2;
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:<col_w$}", "EPG IDs"),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "M3U tvg-ids",
-            Style::default()
-                .fg(GROUP_COLOR)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(Span::styled(
-        "─".repeat(inner_w),
-        Style::default().fg(DIM),
-    )));
-
-    let max_rows = epg_count.max(m3u_count);
-    for i in 0..max_rows {
-        let epg_cell = epg_ids.get(i).map(String::as_str).unwrap_or("");
-        let m3u_cell = m3u_ids.get(i).copied().unwrap_or("");
-        let epg_lower = epg_cell.to_lowercase();
-        let m3u_lower = m3u_cell.to_lowercase();
-        let matched = !epg_cell.is_empty() && !m3u_cell.is_empty() && epg_lower == m3u_lower;
-        let epg_style = if matched {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let m3u_style = if matched {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<col_w$}", truncate(epg_cell, col_w.saturating_sub(1))),
-                epg_style,
-            ),
-            Span::styled(truncate(m3u_cell, col_w), m3u_style),
-        ]));
-    }
-
-    // Clamp scroll
-    let max_scroll = lines.len().saturating_sub(inner_h);
-    let scroll = app.epg_info_scroll.min(max_scroll);
-
-    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(inner_h).collect();
-
-    // Clear background
-    f.render_widget(Block::default().style(Style::default().bg(BG)), popup);
-    f.render_widget(
-        Paragraph::new(visible).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT))
-                .style(Style::default().bg(BG))
-                .title(Span::styled(
-                    " EPG Info — ↑↓ scroll   i/Esc close ",
-                    Style::default().fg(ACCENT),
-                )),
-        ),
-        popup,
-    );
-}
-
-fn draw_epg_panel(f: &mut Frame, area: ratatui::layout::Rect, app: &AppState) {
-    let epg_data = match app.epg {
-        Some(e) => e,
-        None => return,
-    };
-
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    if let Some(ch) = app.selected_channel() {
-        match &ch.tvg_id {
-            None => {
-                lines.push(Line::from(Span::styled(
-                    "No tvg-id in M3U",
-                    Style::default().fg(DIM),
-                )));
-            }
-            Some(tvg_id) => {
-                // Show the ID being used so mismatches are easy to spot
-                lines.push(Line::from(vec![
-                    Span::styled("ID  ", Style::default().fg(DIM)),
-                    Span::styled(
-                        truncate(tvg_id, inner_width.saturating_sub(4)),
-                        Style::default().fg(DIM),
-                    ),
-                ]));
-
-                let (now_prog, next_prog) = epg::now_and_next(epg_data, tvg_id);
-
-                if now_prog.is_none() && next_prog.is_none() {
-                    lines.push(Line::from(Span::styled(
-                        "No EPG data for this ID",
-                        Style::default().fg(DIM),
-                    )));
-                }
-
-                if let Some(prog) = now_prog {
-                    lines.push(Line::from(vec![
-                        Span::styled("NOW  ", Style::default().fg(ACCENT)),
-                        Span::styled(
-                            format!(
-                                "{}–{}",
-                                epg::format_time(prog.start),
-                                epg::format_time(prog.stop)
-                            ),
-                            Style::default().fg(Color::White),
-                        ),
-                    ]));
-                    lines.push(Line::from(Span::styled(
-                        truncate(&prog.title, inner_width),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                    if let Some(desc) = &prog.desc {
-                        for line in wrap_text(desc, inner_width).into_iter().take(4) {
-                            lines.push(Line::from(Span::styled(line, Style::default().fg(DIM))));
-                        }
-                    }
-                    lines.push(Line::raw(""));
-                }
-
-                if let Some(prog) = next_prog {
-                    lines.push(Line::from(vec![
-                        Span::styled("NEXT ", Style::default().fg(PURPLE)),
-                        Span::styled(
-                            format!(
-                                "{}–{}",
-                                epg::format_time(prog.start),
-                                epg::format_time(prog.stop)
-                            ),
-                            Style::default().fg(Color::White),
-                        ),
-                    ]));
-                    lines.push(Line::from(Span::styled(
-                        truncate(&prog.title, inner_width),
-                        Style::default().fg(Color::White),
-                    )));
-                }
-            }
-        }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "No channel selected",
-            Style::default().fg(DIM),
-        )));
-    }
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(DIM))
-                    .style(Style::default().bg(BG))
-                    .title(Span::styled(" EPG ", Style::default().fg(ACCENT))),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
-    );
 }
 
 // ─── Main draw ────────────────────────────────────────────────────────────────
@@ -891,28 +465,22 @@ fn draw(f: &mut Frame, app: &mut AppState) {
     // Title bar
     let count = app.filtered.len();
     let total = app.all_channels.len();
-    let mut title_spans = vec![
-        Span::styled(
-            " ipbeeldbuis",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  [{}]", app.content_filter.label()),
-            Style::default().fg(GROUP_COLOR),
-        ),
-        Span::styled(
-            format!("  {count}/{total} channels"),
-            Style::default().fg(DIM),
-        ),
-    ];
-    if app.epg_only {
-        title_spans.push(Span::styled(
-            "  [EPG only]",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
-    }
     f.render_widget(
-        Paragraph::new(Line::from(title_spans)).style(Style::default().bg(BG)),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ipbeeldbuis",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  [{}]", app.content_filter.label()),
+                Style::default().fg(GROUP_COLOR),
+            ),
+            Span::styled(
+                format!("  {count}/{total} channels"),
+                Style::default().fg(DIM),
+            ),
+        ]))
+        .style(Style::default().bg(BG)),
         layout[0],
     );
 
@@ -999,17 +567,7 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         layout[2],
     );
 
-    // Channel list ± EPG panel
-    let list_area = if app.epg_visible && app.epg.is_some() {
-        let h = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(20), Constraint::Length(40)])
-            .split(layout[3]);
-        draw_epg_panel(f, h[1], app);
-        h[0]
-    } else {
-        layout[3]
-    };
+    let list_area = layout[3];
 
     let items: Vec<ListItem> = app
         .filtered
@@ -1047,16 +605,9 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         &mut app.list_state,
     );
 
-    // EPG info overlay (drawn on top of everything)
-    if app.show_epg_info {
-        draw_epg_info_overlay(f, app);
-    }
-
     // Keybinding hints
     let hints = if app.search_mode {
         " ↑↓ navigate   Esc clear   Enter confirm"
-    } else if app.epg.is_some() {
-        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   f epg filter   e epg   i epg info   s settings   Enter play   q quit"
     } else {
         " ↑↓/jk navigate   ←→/hl tabs   / search   t content   s settings   a add   Enter play   q quit"
     };

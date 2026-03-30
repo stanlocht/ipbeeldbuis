@@ -7,8 +7,6 @@ pub struct PlaylistEntry {
     pub name: String,
     pub url: String,
     pub last_fetched: u64, // UNIX timestamp
-    #[serde(default)]
-    pub epg_url: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -92,18 +90,10 @@ pub fn prompt_add_playlist() -> Result<PlaylistEntry> {
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_string();
-    eprint!("Enter EPG URL (press Enter to skip): ");
-    let mut epg = String::new();
-    std::io::stdin().read_line(&mut epg)?;
-    let epg_url = {
-        let s = epg.trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
-    };
     Ok(PlaylistEntry {
         name,
         url,
         last_fetched: 0,
-        epg_url,
     })
 }
 

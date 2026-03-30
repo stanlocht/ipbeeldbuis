@@ -110,14 +110,6 @@ pub fn fetch_or_read(source: &str) -> Result<Vec<Channel>> {
     Ok(parse(&fetch_or_read_raw(source)?))
 }
 
-pub fn parse_epg_url(content: &str) -> Option<String> {
-    let header = content.lines().next()?;
-    if !header.starts_with("#EXTM3U") {
-        return None;
-    }
-    extract_attr(header, "url-tvg").or_else(|| extract_attr(header, "x-tvg-url"))
-}
-
 pub fn fetch_url(url: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
