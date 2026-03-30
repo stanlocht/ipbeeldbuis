@@ -285,9 +285,7 @@ fn event_loop(terminal: &mut Term, app: &mut AppState) -> Result<Action> {
                         app.cycle_content_filter();
                     }
                     (_, KeyCode::Char('e')) => {
-                        if app.epg.is_some() {
-                            app.epg_visible = !app.epg_visible;
-                        }
+                        app.epg_visible = !app.epg_visible;
                     }
                     (_, KeyCode::Char('s')) => return Ok(Action::OpenSettings),
                     (_, KeyCode::Char('a')) => return Ok(Action::AddPlaylist),
@@ -533,13 +531,40 @@ fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 fn draw_epg_panel(f: &mut Frame, area: ratatui::layout::Rect, app: &AppState) {
-    let epg_data = match app.epg {
-        Some(e) => e,
-        None => return,
-    };
-
     let inner_width = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
+
+    let epg_data = match app.epg {
+        Some(e) => e,
+        None => {
+            lines.push(Line::from(Span::styled(
+                "No EPG configured.",
+                Style::default().fg(DIM),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "Add an EPG URL in",
+                Style::default().fg(DIM),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Settings (s).",
+                Style::default().fg(DIM),
+            )));
+            f.render_widget(
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(DIM))
+                            .style(Style::default().bg(BG))
+                            .title(Span::styled(" EPG ", Style::default().fg(ACCENT))),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+            return;
+        }
+    };
 
     if let Some(ch) = app.selected_channel() {
         match &ch.tvg_id {
@@ -1369,7 +1394,7 @@ fn draw(f: &mut Frame, app: &mut AppState) {
     );
 
     // Channel list ± EPG panel
-    let list_area = if app.epg_visible && app.epg.is_some() {
+    let list_area = if app.epg_visible {
         let h = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(20), Constraint::Length(40)])
@@ -1421,10 +1446,8 @@ fn draw(f: &mut Frame, app: &mut AppState) {
         " ↑↓ navigate   Esc clear   Enter confirm"
     } else if app.cast_status.is_some() {
         " ↑↓/jk navigate   ←→/hl tabs   / search   c cast control   Enter play locally   q quit"
-    } else if app.epg.is_some() {
-        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   e epg   c cast   s settings   a add   Enter play   q quit"
     } else {
-        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   c cast   s settings   a add   Enter play   q quit"
+        " ↑↓/jk navigate   ←→/hl tabs   / search   t content   e epg   c cast   s settings   a add   Enter play   q quit"
     };
     f.render_widget(
         Paragraph::new(hints)
