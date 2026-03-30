@@ -1,8 +1,18 @@
 # ipbeeldbuis
 
+```
+    _       __              __    ____          _
+   (_)___  / /_  ___  ___  / /___/ / /_  __  __(_)____
+  / / __ \/ __ \/ _ \/ _ \/ / __  / __ \/ / / / / ___/
+ / / /_/ / /_/ /  __/  __/ / /_/ / /_/ / /_/ / (__  )
+/_/ .___/_.___/\___/\___/_/\__,_/_.___/\__,_/_/____/
+ /_/
+```
+
 A terminal UI for browsing and playing IPTV streams from M3U playlists.
 
 **Requires [mpv](https://mpv.io) to be installed for playback.**
+Supports casting streams directly to a **Chromecast** device on your local network.
 
 ---
 
@@ -70,6 +80,7 @@ ipbeeldbuis
 | `s` | Settings — manage playlists and EPG URLs |
 | `a` | Add a new playlist |
 | `Enter` | Play selected channel |
+| `c` | Cast selected channel to Chromecast |
 | `q` | Quit |
 
 ---

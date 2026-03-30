@@ -73,6 +73,7 @@ fn main() -> Result<()> {
         let epg_url = m3u::parse_epg_url(&content);
         let epg_data = load_epg(epg_url.as_deref());
         let mut terminal = ui::setup_terminal()?;
+        ui::splash(&mut terminal)?;
         let result = (|| -> Result<()> {
             let mut cast_status: Option<String> = None;
             let mut cast_session: Option<chromecast::CastSession> = None;
@@ -121,6 +122,7 @@ fn main() -> Result<()> {
     };
 
     let mut terminal = ui::setup_terminal()?;
+    ui::splash(&mut terminal)?;
     let result = (|| -> Result<()> {
         let mut cast_status: Option<String> = None;
         let mut cast_session: Option<chromecast::CastSession> = None;

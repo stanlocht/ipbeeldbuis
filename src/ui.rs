@@ -31,6 +31,90 @@ pub fn restore_terminal(terminal: &mut Term) {
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
 }
 
+pub fn splash(terminal: &mut Term) -> Result<()> {
+    #[rustfmt::skip]
+    let art: &[&str] = &[
+        r"    _       __              __    ____          _     ",
+        r"   (_)___  / /_  ___  ___  / /___/ / /_  __  __(_)____",
+        r"  / / __ \/ __ \/ _ \/ _ \/ / __  / __ \/ / / / / ___/",
+        r" / / /_/ / /_/ /  __/  __/ / /_/ / /_/ / /_/ / (__  ) ",
+        r"/_/ .___/_.___/\___/\___/_/\__,_/_.___/\__,_/_/____/  ",
+        r" /_/                                                   ",
+    ];
+
+    let sub = "IPTV stream picker";
+    let hint = "press any key";
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(2000);
+
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+
+            let sep: String = "─".repeat(area.width as usize);
+
+            let art_h = art.len() as u16;
+            let total_h = art_h + 4;
+            let top = area.height.saturating_sub(total_h) / 2;
+
+            let center = |f: &mut Frame, y: u16, text: &str, style: Style| {
+                if y >= area.height {
+                    return;
+                }
+                let w = text.len() as u16;
+                let x = area.width.saturating_sub(w) / 2;
+                let r = Rect::new(x, y, w.min(area.width.saturating_sub(x)), 1);
+                f.render_widget(Paragraph::new(text).style(style), r);
+            };
+
+            let sep_rect = |f: &mut Frame, y: u16| {
+                if y >= area.height {
+                    return;
+                }
+                let r = Rect::new(0, y, area.width, 1);
+                f.render_widget(
+                    Paragraph::new(sep.as_str()).style(Style::default().fg(DIM).bg(BG)),
+                    r,
+                );
+            };
+
+            sep_rect(f, top);
+            for (i, line) in art.iter().enumerate() {
+                center(
+                    f,
+                    top + 1 + i as u16,
+                    line,
+                    Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(BG),
+                );
+            }
+            sep_rect(f, top + 1 + art_h);
+            center(f, top + 1 + art_h + 2, sub, Style::default().fg(DIM));
+            center(
+                f,
+                top + 1 + art_h + 4,
+                hint,
+                Style::default().fg(Color::Rgb(60, 60, 80)),
+            );
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(_) = event::read()?
+        {
+            break;
+        }
+        if start.elapsed() >= timeout {
+            break;
+        }
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
 const ACCENT: Color = Color::Rgb(120, 200, 255);
 const DIM: Color = Color::Rgb(100, 100, 120);
 const GROUP_COLOR: Color = Color::Rgb(180, 140, 255);
